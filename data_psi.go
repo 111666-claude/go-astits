@@ -47,7 +47,44 @@ const (
 	PSITableIDNITVariant2 PSITableID = 0x41
 )
 
-var ErrCRC32Mismatch = errors.New("astits: CRC32 mismatch")
+var (
+	// ErrCRC32Mismatch is returned, possibly wrapped, when a PSI section's CRC32
+	// does not match the checksum computed over its declared bytes. Callers should
+	// match it with errors.Is.
+	ErrCRC32Mismatch = errors.New("astits: CRC32 mismatch")
+
+	// ErrPSIPointerField is returned when a PSI pointer field does not fit in the
+	// payload it belongs to.
+	ErrPSIPointerField = errors.New("astits: invalid PSI pointer field")
+
+	// ErrPSISectionLength is returned when a PSI section length is too small to
+	// contain the mandatory fields of its table. Such sections cannot be CRC
+	// checked and must not be reported as ErrCRC32Mismatch.
+	ErrPSISectionLength = errors.New("astits: invalid PSI section length")
+
+	// ErrPSITruncated is returned when a PSI section length exceeds the bytes
+	// available in the payload.
+	ErrPSITruncated = errors.New("astits: truncated PSI section")
+)
+
+// CRC32MismatchError carries the CRC32 values involved in a PSI checksum
+// mismatch. It matches ErrCRC32Mismatch with errors.Is and can be retrieved with
+// errors.As, even when wrapped in additional error layers.
+type CRC32MismatchError struct {
+	TableCRC32    uint32 // CRC32 read from the table
+	ComputedCRC32 uint32 // CRC32 computed over the table bytes
+}
+
+// Error implements the error interface
+func (e *CRC32MismatchError) Error() string {
+	return fmt.Sprintf("astits: Table CRC32 %x != computed CRC32 %x", e.TableCRC32, e.ComputedCRC32)
+}
+
+// Is makes CRC32MismatchError match ErrCRC32Mismatch. It is stateless so repeated
+// checks don't alter the error.
+func (e *CRC32MismatchError) Is(target error) bool {
+	return target == ErrCRC32Mismatch
+}
 
 // PSIData represents a PSI data
 // https://en.wikipedia.org/wiki/Program-specific_information
@@ -112,6 +149,13 @@ func parsePSIData(i *astikit.BytesIterator) (d *PSIData, err error) {
 	// Pointer field
 	d.PointerField = int(b)
 
+	// Check pointer field. Bytes before the first section start can't exceed the
+	// payload, otherwise the section boundary is unknown.
+	if d.PointerField > i.Len()-i.Offset() {
+		err = fmt.Errorf("astits: pointer field %d exceeds payload length: %w", d.PointerField, ErrPSIPointerField)
+		return
+	}
+
 	// Pointer filler bytes
 	i.Skip(d.PointerField)
 
@@ -143,6 +187,14 @@ func parsePSISection(i *astikit.BytesIterator) (s *PSISection, stop bool, err er
 	// Check whether we need to stop the parsing
 	if shouldStopPSIParsing(s.Header.TableID) {
 		stop = true
+		return
+	}
+
+	// Validate the declared section bounds before parsing table data. Malformed
+	// lengths must be reported as such instead of surfacing later as a CRC32
+	// mismatch computed over bytes outside the section.
+	if err = validatePSISectionBounds(i, s.Header, offsetEnd); err != nil {
+		err = fmt.Errorf("astits: validating PSI section bounds failed: %w", err)
 		return
 	}
 
@@ -178,7 +230,10 @@ func parsePSISection(i *astikit.BytesIterator) (s *PSISection, stop bool, err er
 
 			// Check CRC32
 			if crc32 != s.CRC32 {
-				err = errors.Join(ErrCRC32Mismatch, fmt.Errorf("astits: Table CRC32 %x != computed CRC32 %x", s.CRC32, crc32))
+				err = errors.Join(ErrCRC32Mismatch, &CRC32MismatchError{
+					TableCRC32:    s.CRC32,
+					ComputedCRC32: crc32,
+				})
 				return
 			}
 		}
@@ -187,6 +242,57 @@ func parsePSISection(i *astikit.BytesIterator) (s *PSISection, stop bool, err er
 	// Seek to the end of the section
 	i.Seek(offsetEnd)
 	return
+}
+
+// validatePSISectionBounds checks that a section's declared length is consistent
+// with the bytes available in the payload. A section that is too short for its
+// mandatory fields can't be checksummed and would otherwise be reported as a
+// CRC32 mismatch computed over an arbitrary byte range.
+func validatePSISectionBounds(i *astikit.BytesIterator, h *PSISectionHeader, offsetEnd int) error {
+	// Sections with a CRC32 must at least be able to hold the mandatory fields
+	// of their table and the checksum itself. Zero length sections don't carry a
+	// checksum and keep their previous handling.
+	if h.SectionLength > 0 {
+		if minimum := h.TableID.minimumSectionLength(); minimum > 0 && int(h.SectionLength) < minimum {
+			return fmt.Errorf("astits: section length %d is smaller than the minimum %d: %w", h.SectionLength, minimum, ErrPSISectionLength)
+		}
+	}
+
+	// The section must fit in the payload
+	if offsetEnd > i.Len() {
+		return fmt.Errorf("astits: section length %d exceeds payload length: %w", h.SectionLength, ErrPSITruncated)
+	}
+	return nil
+}
+
+// minimumSectionLength returns the smallest declared section length able to
+// contain the mandatory fields of the table and its CRC32. It returns 0 for
+// tables that carry no CRC32.
+func (t PSITableID) minimumSectionLength() int {
+	if !t.hasCRC32() {
+		return 0
+	}
+
+	// Syntax section header + CRC32
+	minimum := 4
+	if t.hasPSISyntaxHeader() {
+		minimum += 5
+	}
+
+	// Mandatory fields following the syntax section header
+	switch {
+	case t == PSITableIDPMT:
+		minimum += 4 // PCR PID + program descriptor loop length
+	case t == PSITableIDNITVariant1, t == PSITableIDNITVariant2:
+		minimum += 4 // network descriptor loop length + transport stream loop length
+	case t == PSITableIDSDTVariant1, t == PSITableIDSDTVariant2:
+		minimum += 3 // original network ID + reserved byte
+	case t == PSITableIDTOT:
+		minimum += 7 // UTC time + descriptor loop length
+	case t >= PSITableIDEITStart && t <= PSITableIDEITEnd:
+		minimum += 6 // transport stream ID + original network ID + segment and table IDs
+	}
+	return minimum
 }
 
 // parseCRC32 parses a CRC32
