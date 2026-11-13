@@ -140,3 +140,22 @@ func TestPacketPoolBoundedPESCompletesWithoutNextStart(t *testing.T) {
 	assert.Equal(t, packets, b.addUnlocked(packets[2]))
 	assert.Empty(t, b.dumpUnlocked())
 }
+
+// A bounded PES whose fixed header is split so that the first TS packet carries
+// fewer than 3 payload bytes must still be flushed as soon as it completes.
+func TestPacketPoolBoundedPESSplitFixedHeader(t *testing.T) {
+	// Full PES payload: start code, stream id, packet length 5, optional header, 2 data bytes.
+	full := []byte{0, 0, 1, 0xe0, 0, 5, 0x80, 0, 0, 42, 43}
+	for _, first := range []int{1, 2, 3, 5} {
+		b := newPacketPool(nil)
+		packets := []*Packet{
+			{Header: PacketHeader{PID: 256, ContinuityCounter: 0, HasPayload: true, PayloadUnitStartIndicator: true}, Payload: full[:first]},
+			{Header: PacketHeader{PID: 256, ContinuityCounter: 1, HasPayload: true}, Payload: full[first:6]},
+			{Header: PacketHeader{PID: 256, ContinuityCounter: 2, HasPayload: true}, Payload: full[6:]},
+		}
+		assert.Empty(t, b.addUnlocked(packets[0]), "first=%d", first)
+		assert.Empty(t, b.addUnlocked(packets[1]), "first=%d", first)
+		assert.Equal(t, packets, b.addUnlocked(packets[2]), "first=%d", first)
+		assert.Empty(t, b.dumpUnlocked(), "first=%d", first)
+	}
+}

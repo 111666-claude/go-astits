@@ -171,3 +171,64 @@ func TestIsPESComplete_UnboundedAndPartialDoNotAllocate(t *testing.T) {
 		assert.Zero(t, testing.AllocsPerRun(100, func() { isPESComplete(packets) }))
 	}
 }
+
+func TestIsPESPacketsPayload(t *testing.T) {
+	// Prefix split across packets
+	assert.True(t, isPESPacketsPayload([]*Packet{{Payload: []byte{0}}, {Payload: []byte{0, 1, 0xe0}}}))
+	assert.True(t, isPESPacketsPayload([]*Packet{{}, {Payload: []byte{0, 0}}, {}, {Payload: []byte{1}}}))
+	// Not enough bytes yet
+	assert.False(t, isPESPacketsPayload([]*Packet{{Payload: []byte{0, 0}}}))
+	assert.False(t, isPESPacketsPayload([]*Packet{{}}))
+	// Invalid start code
+	assert.False(t, isPESPacketsPayload([]*Packet{{Payload: []byte{0, 0, 2}}}))
+	assert.False(t, isPESPacketsPayload([]*Packet{{Payload: []byte{0}}, {Payload: []byte{1, 0}}}))
+}
+
+func TestIsPESComplete_BoundaryLengths(t *testing.T) {
+	// 9-byte PES: 6-byte fixed header + 3-byte optional header, no data.
+	base := []byte{0, 0, 1, 0xe0, 0, 3, 0x80, 0, 0}
+	for _, tc := range []struct {
+		name           string
+		declaredLength int
+		received       int
+		want           bool
+	}{
+		{"exact", 3, 9, true},
+		{"one_more_than_received", 4, 9, false},
+		{"one_less_than_received", 2, 9, true},
+		{"declared_max_received_short", 0xffff, 9, false},
+	} {
+		payload := make([]byte, tc.received)
+		copy(payload, base)
+		payload[4], payload[5] = byte(tc.declaredLength>>8), byte(tc.declaredLength)
+		// Whole payload in a single packet.
+		assert.Equal(t, tc.want, isPESComplete([]*Packet{{Payload: payload}}), tc.name)
+		// Same payload fragmented across packets at every split point.
+		for split := 0; split <= tc.received; split++ {
+			packets := []*Packet{{Payload: payload[:split]}, {Payload: payload[split:]}}
+			assert.Equal(t, tc.want, isPESComplete(packets), "%s split=%d", tc.name, split)
+		}
+	}
+}
+
+// Checking a large fragmented PES must not copy the payload on every fragment:
+// the incomplete path performs no allocation at all, whatever the fragment count.
+func TestIsPESComplete_LargeFragmentedPESDoesNotAllocate(t *testing.T) {
+	const count = 6000
+	const fragment = 10 // Small fragments so the declared length fits in uint16.
+	payload := make([]byte, count*fragment)
+	copy(payload, []byte{0, 0, 1, 0xe0, 0, 0, 0x80, 0, 0})
+	// Declare one byte more than will be received: the PES stays incomplete.
+	length := len(payload) - 6 + 1
+	payload[4], payload[5] = byte(length>>8), byte(length)
+	packets := make([]*Packet, count)
+	for i := range packets {
+		packets[i] = &Packet{Payload: payload[i*fragment : (i+1)*fragment]}
+	}
+	assert.False(t, isPESComplete(packets))
+	assert.Zero(t, testing.AllocsPerRun(10, func() { isPESComplete(packets) }))
+
+	// Once the declared length is received, the PES is complete.
+	payload[4], payload[5] = byte((len(payload)-6)>>8), byte(len(payload)-6)
+	assert.True(t, isPESComplete(packets))
+}

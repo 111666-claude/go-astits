@@ -128,6 +128,20 @@ func isPESPayload(i []byte) bool {
 	return uint32(i[0])<<16|uint32(i[1])<<8|uint32(i[2]) == 1
 }
 
+// isPESPacketsPayload checks whether the payload spanning over multiple packets is a PES one
+// The fixed header may be split across packets, so the 3-byte prefix has to be reassembled
+func isPESPacketsPayload(ps []*Packet) bool {
+	var prefix [3]byte
+	var n int
+	for _, p := range ps {
+		n += copy(prefix[n:], p.Payload)
+		if n == len(prefix) {
+			break
+		}
+	}
+	return isPESPayload(prefix[:n])
+}
+
 // isPSIComplete checks whether we have sufficient amount of packets to parse PSI
 func isPSIComplete(ps []*Packet) bool {
 	// Get payload length
