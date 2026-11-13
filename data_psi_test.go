@@ -2,6 +2,8 @@ package astits
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/asticode/go-astikit"
@@ -168,12 +170,159 @@ func TestParsePSIData(t *testing.T) {
 	w.Write(totBytes())     // TOT data
 	w.Write(uint32(32))     // TOT CRC32
 	_, err := parsePSIData(astikit.NewBytesIterator(buf.Bytes()))
-	assert.EqualError(t, err, "astits: parsing PSI table failed: astits: Table CRC32 20 != computed CRC32 6969b13")
+	assert.True(t, errors.Is(err, ErrCRC32Mismatch))
+	assert.Equal(t, "astits: parsing PSI table failed: astits: CRC32 mismatch\nastits: Table CRC32 20 != computed CRC32 6969b13", err.Error())
 
 	// Valid
 	d, err := parsePSIData(astikit.NewBytesIterator(psiBytes()))
 	assert.NoError(t, err)
 	assert.Equal(t, d, psi)
+}
+
+func crcMismatchTOTBytes() []byte {
+	buf := &bytes.Buffer{}
+	w := astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: buf})
+	w.Write(uint8(0))       // Pointer field
+	w.Write(uint8(115))     // TOT table ID
+	w.Write("1")            // TOT syntax section indicator
+	w.Write("1")            // TOT private bit
+	w.Write("11")           // TOT reserved
+	w.Write("000000001110") // TOT section length
+	w.Write(totBytes())     // TOT data
+	w.Write(uint32(32))     // TOT CRC32
+	return buf.Bytes()
+}
+
+func TestCRC32MismatchError(t *testing.T) {
+	_, err := parsePSIData(astikit.NewBytesIterator(crcMismatchTOTBytes()))
+	assert.Error(t, err)
+
+	// The sentinel is matchable
+	assert.True(t, errors.Is(err, ErrCRC32Mismatch))
+
+	// The original values and wrapping layers are preserved
+	var e *CRC32MismatchError
+	assert.True(t, errors.As(err, &e))
+	assert.Equal(t, uint32(0x20), e.TableCRC32)
+	assert.Equal(t, uint32(0x06969b13), e.ComputedCRC32)
+	assert.Contains(t, err.Error(), "astits: Table CRC32 20")
+	assert.Contains(t, err.Error(), "computed CRC32 6969b13")
+	assert.Contains(t, err.Error(), "astits: parsing PSI table failed")
+	assert.Contains(t, err.Error(), "astits: CRC32 mismatch")
+
+	// Matching still works through additional wrapping layers
+	wrapped := fmt.Errorf("layer 1: %w", fmt.Errorf("layer 2: %w", err))
+	assert.True(t, errors.Is(wrapped, ErrCRC32Mismatch))
+	var eWrapped *CRC32MismatchError
+	assert.True(t, errors.As(wrapped, &eWrapped))
+	assert.Equal(t, e.TableCRC32, eWrapped.TableCRC32)
+	assert.Equal(t, e.ComputedCRC32, eWrapped.ComputedCRC32)
+
+	// Repeated checks don't alter the error semantics
+	for i := 0; i < 3; i++ {
+		assert.True(t, errors.Is(err, ErrCRC32Mismatch))
+		assert.True(t, errors.Is(wrapped, ErrCRC32Mismatch))
+	}
+	assert.Equal(t, "astits: parsing PSI table failed: astits: CRC32 mismatch\nastits: Table CRC32 20 != computed CRC32 6969b13", err.Error())
+}
+
+func TestCRC32MismatchErrorNotSet(t *testing.T) {
+	// Valid PSI data must not match the CRC32 mismatch sentinel nor be a CRC32MismatchError
+	d, err := parsePSIData(astikit.NewBytesIterator(psiBytes()))
+	assert.NoError(t, err)
+	assert.False(t, errors.Is(err, ErrCRC32Mismatch))
+	var e *CRC32MismatchError
+	assert.False(t, errors.As(err, &e))
+	assert.Equal(t, d, psi)
+
+	// Truncated section: reported as truncation, not as a checksum mismatch
+	buf := &bytes.Buffer{}
+	w := astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: buf})
+	w.Write(uint8(0))       // Pointer field
+	w.Write(uint8(115))     // TOT table ID
+	w.Write("1")            // TOT syntax section indicator
+	w.Write("1")            // TOT private bit
+	w.Write("11")           // TOT reserved
+	w.Write("000000001110") // TOT section length
+	w.Write(totBytes()[:4])
+	_, err = parsePSIData(astikit.NewBytesIterator(buf.Bytes()))
+	assert.Error(t, err)
+	assert.False(t, errors.Is(err, ErrCRC32Mismatch))
+	assert.True(t, errors.Is(err, ErrPSITruncated))
+
+	// Section length too small to hold the mandatory TOT UTC time and CRC32
+	buf = &bytes.Buffer{}
+	w = astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: buf})
+	w.Write(uint8(0))       // Pointer field
+	w.Write(uint8(115))     // TOT table ID
+	w.Write("1")            // TOT syntax section indicator
+	w.Write("1")            // TOT private bit
+	w.Write("11")           // TOT reserved
+	w.Write("000000000100") // TOT section length: smaller than UTC time + CRC32
+	w.Write(totBytes())
+	w.Write(uint32(32))
+	_, err = parsePSIData(astikit.NewBytesIterator(buf.Bytes()))
+	assert.Error(t, err)
+	assert.False(t, errors.Is(err, ErrCRC32Mismatch))
+	assert.True(t, errors.Is(err, ErrPSISectionLength))
+
+	// Section length too small to hold the PAT syntax header and CRC32
+	buf = &bytes.Buffer{}
+	w = astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: buf})
+	w.Write(uint8(0))       // Pointer field
+	w.Write(uint8(0))       // PAT table ID
+	w.Write("1")            // PAT syntax section indicator
+	w.Write("1")            // PAT private bit
+	w.Write("11")           // PAT reserved
+	w.Write("000000000001") // PAT section length
+	w.Write(psiSectionSyntaxHeaderBytes())
+	w.Write(patBytes())
+	w.Write(uint32(0x60739f61))
+	_, err = parsePSIData(astikit.NewBytesIterator(buf.Bytes()))
+	assert.Error(t, err)
+	assert.False(t, errors.Is(err, ErrCRC32Mismatch))
+	assert.True(t, errors.Is(err, ErrPSISectionLength))
+
+	// Pointer field exceeding the payload
+	buf = &bytes.Buffer{}
+	w = astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: buf})
+	w.Write(uint8(200)) // Pointer field
+	w.Write(uint8(115)) // TOT table ID
+	_, err = parsePSIData(astikit.NewBytesIterator(buf.Bytes()))
+	assert.Error(t, err)
+	assert.False(t, errors.Is(err, ErrCRC32Mismatch))
+	assert.True(t, errors.Is(err, ErrPSIPointerField))
+
+	// Unknown table: parsing stops cleanly and isn't classified as a CRC error
+	buf = &bytes.Buffer{}
+	w = astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: buf})
+	w.Write(uint8(0))   // Pointer field
+	w.Write(uint8(254)) // Unknown table ID
+	w.Write(uint8(0))   // Finish the byte
+	_, err = parsePSIData(astikit.NewBytesIterator(buf.Bytes()))
+	assert.NoError(t, err)
+	assert.False(t, errors.Is(err, ErrCRC32Mismatch))
+}
+
+func TestCRC32MismatchManySections(t *testing.T) {
+	// A valid TOT section repeated 6000 times: every section is checksummed once
+	// and the payload parses linearly without spurious CRC errors.
+	section := crcMismatchTOTBytes()[1:] // Drop the leading pointer field
+	section = append(section[:len(section)-4], 0x06, 0x96, 0x9b, 0x13)
+
+	payload := make([]byte, 0, 1+6000*len(section))
+	payload = append(payload, 0) // Pointer field
+	for i := 0; i < 6000; i++ {
+		payload = append(payload, section...)
+	}
+
+	d, err := parsePSIData(astikit.NewBytesIterator(payload))
+	assert.NoError(t, err)
+	assert.Len(t, d.Sections, 6000)
+	for _, s := range d.Sections {
+		assert.Equal(t, tot, s.Syntax.Data.TOT)
+		assert.Equal(t, uint32(0x06969b13), s.CRC32)
+	}
 }
 
 var psiSectionHeader = &PSISectionHeader{
