@@ -504,3 +504,63 @@ func BenchmarkParsePESData(b *testing.B) {
 		})
 	}
 }
+
+func TestParsePESDataInvalidOffsets(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		bytesFunc func(w *astikit.BitsWriter)
+		err       string
+	}{
+		{
+			// The optional header announces a data start located after the data end computed from the packet length
+			name: "data_end_before_data_start",
+			bytesFunc: func(w *astikit.BitsWriter) {
+				w.Write("000000000000000000000001") // Prefix
+				w.Write(uint8(0xe0))                // Stream ID
+				w.Write(uint16(2))                  // Packet length
+				w.Write(uint8(0x80))                // Marker bits
+				w.Write(uint8(0))                   // Flags
+				w.Write(uint8(0))                   // Header length
+			},
+			err: "astits: data end 8 is before data start 9",
+		},
+		{
+			// The packet length overflows the payload: no out-of-bounds slice must be created
+			name: "data_end_out_of_bounds",
+			bytesFunc: func(w *astikit.BitsWriter) {
+				w.Write("000000000000000000000001") // Prefix
+				w.Write(uint8(0xe0))                // Stream ID
+				w.Write(uint16(0xffff))             // Packet length
+				w.Write(uint8(0x80))                // Marker bits
+				w.Write(uint8(0))                   // Flags
+				w.Write(uint8(0))                   // Header length
+			},
+			err: "astits: data offsets [9:65541] are out of payload bounds [0:9]",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := &bytes.Buffer{}
+			w := astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: buf})
+			tc.bytesFunc(w)
+			_, err := parsePESData(astikit.NewBytesIterator(buf.Bytes()))
+			assert.EqualError(t, err, tc.err)
+		})
+	}
+}
+
+func FuzzParsePESData(f *testing.F) {
+	// Seed with valid and corrupted PES payloads
+	{
+		buf := &bytes.Buffer{}
+		w := astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: buf})
+		pesTestCases[0].headerBytesFunc(w, true, true)
+		pesTestCases[0].optionalHeaderBytesFunc(w, true, true)
+		pesTestCases[0].bytesFunc(w, true, true)
+		f.Add(buf.Bytes())
+	}
+	f.Add([]byte{0x00, 0x00, 0x01, 0xe0, 0x00, 0x02, 0x80, 0x00, 0x00})
+	f.Add([]byte{0x00, 0x00, 0x01, 0xe0, 0xff, 0xff})
+	f.Fuzz(func(t *testing.T, b []byte) {
+		_, _ = parsePESData(astikit.NewBytesIterator(b))
+	})
+}

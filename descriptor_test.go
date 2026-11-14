@@ -703,3 +703,66 @@ func BenchmarkParseDescriptor(b *testing.B) {
 		})
 	}
 }
+
+func TestDescriptorVBIDataUnknownServiceID(t *testing.T) {
+	// A VBI data descriptor whose service ID is unknown must still consume its sub-items instead of
+	// looping forever on the same offset.
+	buf := bytes.Buffer{}
+	buf.Write([]byte{0x00, 0x00}) // Reserve two bytes for length
+	w := astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: &buf})
+	w.Write(uint8(DescriptorTagVBIData)) // Tag
+	w.Write(uint8(3))                    // Length
+	w.Write(uint8(0x7f))                 // Unknown service ID
+	w.Write(uint8(1))                    // Service descriptor length
+	w.Write(uint8(0xff))                 // Sub-items
+	descLen := uint16(buf.Len() - 2)
+	descBytes := buf.Bytes()
+	descBytes[0] = byte(descLen >> 8)
+	descBytes[1] = byte(descLen & 0xff)
+
+	ds, err := parseDescriptors(astikit.NewBytesIterator(descBytes))
+	assert.NoError(t, err)
+	assert.Len(t, ds, 1)
+	assert.Equal(t, &DescriptorVBIData{Services: []*DescriptorVBIDataService{{
+		DataServiceID: 0x7f,
+	}}}, ds[0].VBIData)
+}
+
+func TestDescriptorVBIDataTruncatedItem(t *testing.T) {
+	// A VBI data descriptor whose service descriptor length runs past the descriptor end must return an
+	// error instead of looping forever or panicking.
+	buf := bytes.Buffer{}
+	buf.Write([]byte{0x00, 0x00}) // Reserve two bytes for length
+	w := astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: &buf})
+	w.Write(uint8(DescriptorTagVBIData)) // Tag
+	w.Write(uint8(2))                    // Length
+	w.Write(uint8(VBIDataServiceIDWSS))  // Service ID
+	w.Write(uint8(0xff))                 // Service descriptor length (runs past the descriptor end)
+	descLen := uint16(buf.Len() - 2)
+	descBytes := buf.Bytes()
+	descBytes[0] = byte(descLen >> 8)
+	descBytes[1] = byte(descLen & 0xff)
+
+	_, err := parseDescriptors(astikit.NewBytesIterator(descBytes))
+	assert.Error(t, err)
+}
+
+func FuzzParseDescriptors(f *testing.F) {
+	{
+		buf := bytes.Buffer{}
+		buf.Write([]byte{0x00, 0x00})
+		w := astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: &buf})
+		for _, tc := range descriptorTestTable {
+			tc.bytesFunc(w)
+		}
+		descLen := uint16(buf.Len() - 2)
+		descBytes := buf.Bytes()
+		descBytes[0] = byte(descLen >> 8)
+		descBytes[1] = byte(descLen & 0xff)
+		f.Add(descBytes)
+	}
+	f.Add([]byte{0x00, 0x00, 0x45, 0x03, 0x7f, 0x01, 0xff})
+	f.Fuzz(func(t *testing.T, b []byte) {
+		_, _ = parseDescriptors(astikit.NewBytesIterator(b))
+	})
+}

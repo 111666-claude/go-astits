@@ -194,3 +194,46 @@ func BenchmarkDemuxer_NextData(b *testing.B) {
 		}
 	}
 }
+
+func FuzzDemuxer(f *testing.F) {
+	f.Fuzz(func(t *testing.T, b []byte) {
+		r := bytes.NewReader(b)
+		dmx := NewDemuxer(context.Background(), r, DemuxerOptPacketSize(188))
+		for {
+			_, err := dmx.NextData()
+			if err == ErrNoMorePackets {
+				break
+			}
+		}
+	})
+}
+
+func TestDemuxerNextDataTerminates(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		b    []byte
+	}{
+		{"empty", nil},
+		{"all_zero", make([]byte, MpegTsPacketSize)},
+		{"all_ff", bytes.Repeat([]byte{0xff}, MpegTsPacketSize)},
+		{"all_zero_repeated", make([]byte, 100*MpegTsPacketSize)},
+		{"all_ff_repeated", bytes.Repeat([]byte{0xff}, 100*MpegTsPacketSize)},
+		{"zero_then_ff", append(make([]byte, MpegTsPacketSize), bytes.Repeat([]byte{0xff}, MpegTsPacketSize)...)},
+		{"truncated", bytes.Repeat([]byte{0x47}, MpegTsPacketSize/2)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dmx := NewDemuxer(context.Background(), bytes.NewReader(tc.b), DemuxerOptPacketSize(MpegTsPacketSize))
+			var err error
+			for i := 0; i <= len(tc.b)/MpegTsPacketSize+1; i++ {
+				if _, err = dmx.NextData(); err != nil {
+					break
+				}
+			}
+			assert.Error(t, err, "NextData must terminate with an error on corrupted input")
+
+			// Reader state must be stable: calling NextData again returns an error right away
+			_, err = dmx.NextData()
+			assert.Error(t, err)
+		})
+	}
+}

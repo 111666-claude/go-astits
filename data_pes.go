@@ -129,6 +129,17 @@ func parsePESData(i *astikit.BytesIterator) (d *PESData, err error) {
 		return
 	}
 
+	// Validate data offsets before using them: corrupted headers may advertise a data start located after
+	// the data end or offsets located outside of the payload and we must not create invalid slices.
+	if dataEnd < dataStart {
+		err = fmt.Errorf("astits: data end %d is before data start %d", dataEnd, dataStart)
+		return
+	}
+	if dataStart < 0 || dataEnd > i.Len() {
+		err = fmt.Errorf("astits: data offsets [%d:%d] are out of payload bounds [0:%d]", dataStart, dataEnd, i.Len())
+		return
+	}
+
 	// Seek to data
 	i.Seek(dataStart)
 

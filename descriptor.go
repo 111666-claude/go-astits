@@ -1238,18 +1238,19 @@ func newDescriptorVBIData(i *astikit.BytesIterator, offsetEnd int) (d *Descripto
 		// Data service descriptor
 		offsetDataEnd := i.Offset() + dataServiceDescriptorLength
 		for i.Offset() < offsetDataEnd {
+			// Get next byte: it must be fetched outside of the service ID check, otherwise an unknown service ID
+			// would leave the iterator stuck on the same offset and loop forever.
+			if b, err = i.NextByte(); err != nil {
+				err = fmt.Errorf("astits: fetching next byte failed: %w", err)
+				return
+			}
+
 			if srv.DataServiceID == VBIDataServiceIDClosedCaptioning ||
 				srv.DataServiceID == VBIDataServiceIDEBUTeletext ||
 				srv.DataServiceID == VBIDataServiceIDInvertedTeletext ||
 				srv.DataServiceID == VBIDataServiceIDMonochrome442Samples ||
 				srv.DataServiceID == VBIDataServiceIDVPS ||
 				srv.DataServiceID == VBIDataServiceIDWSS {
-				// Get next byte
-				if b, err = i.NextByte(); err != nil {
-					err = fmt.Errorf("astits: fetching next byte failed: %w", err)
-					return
-				}
-
 				// Append data
 				srv.Descriptors = append(srv.Descriptors, &DescriptorVBIDataDescriptor{
 					FieldParity: b&0x20 > 0,

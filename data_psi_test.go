@@ -381,3 +381,64 @@ func BenchmarkParsePSIData(b *testing.B) {
 		parsePSIData(astikit.NewBytesIterator(psiBytes()))
 	}
 }
+
+func TestPSIToDataEmptySections(t *testing.T) {
+	p := &Packet{}
+
+	// Sections without syntax data must be skipped instead of dereferenced
+	d := &PSIData{Sections: []*PSISection{
+		nil,
+		{},
+		{Header: &PSISectionHeader{TableID: PSITableIDPAT}},
+		{Header: &PSISectionHeader{TableID: PSITableIDPMT}, Syntax: &PSISectionSyntax{}},
+		{Header: &PSISectionHeader{TableID: PSITableIDSDTVariant1}, Syntax: &PSISectionSyntax{Data: &PSISectionSyntaxData{}}},
+		{Header: &PSISectionHeader{TableID: PSITableIDEITStart}, Syntax: &PSISectionSyntax{Data: &PSISectionSyntaxData{}}},
+		{
+			Header: &PSISectionHeader{TableID: PSITableIDPAT},
+			Syntax: &PSISectionSyntax{Data: &PSISectionSyntaxData{PAT: pat}},
+		},
+	}}
+	assert.Equal(t, []*DemuxerData{{FirstPacket: p, PAT: pat, PID: 2}}, d.toData(p, uint16(2)))
+}
+
+func TestParsePSIDataZeroSections(t *testing.T) {
+	// A section with a zero length must not make the parsing loop run forever nor be processed twice
+	for _, b := range [][]byte{
+		{0},                // Only a pointer field
+		{0, 0},             // Pointer field + null table ID
+		{0, 0, 0, 0, 0, 0}, // Pointer field + short section header
+		{0xff, 0xff, 0xff}, // Null table ID
+		{0, 0, 0xff, 0xff}, // Complete null section
+	} {
+		d, _ := parsePSIData(astikit.NewBytesIterator(b))
+		assert.LessOrEqual(t, len(d.Sections), 1, "input %x", b)
+	}
+}
+
+func TestParsePSIDataShortSection(t *testing.T) {
+	// A PAT section whose declared section length is smaller than its CRC32 must return an error instead
+	// of panicking or looping forever.
+	buf := &bytes.Buffer{}
+	w := astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: buf})
+	w.Write(uint8(0))       // Pointer field
+	w.Write(uint8(0))       // PAT table ID
+	w.Write("1")            // Syntax section indicator
+	w.Write("1")            // Private bit
+	w.Write("11")           // Reserved
+	w.Write("000000000001") // Section length (1 byte)
+	w.Write(uint8(0x00))    // Syntax section data
+	_, err := parsePSIData(astikit.NewBytesIterator(buf.Bytes()))
+	assert.Error(t, err)
+}
+
+func FuzzParsePSIData(f *testing.F) {
+	f.Add(psiBytes())
+	f.Add([]byte{0})
+	f.Add([]byte{0, 0, 0xb0, 0x01})
+	f.Fuzz(func(t *testing.T, b []byte) {
+		d, _ := parsePSIData(astikit.NewBytesIterator(b))
+		if d != nil {
+			d.toData(&Packet{}, PIDPAT)
+		}
+	})
+}

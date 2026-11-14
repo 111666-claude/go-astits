@@ -116,8 +116,16 @@ func parsePSIData(i *astikit.BytesIterator) (d *PSIData, err error) {
 	var s *PSISection
 	var stop bool
 	for i.HasBytesLeft() && !stop {
+		offsetBefore := i.Offset()
 		if s, stop, err = parsePSISection(i); err != nil {
 			err = fmt.Errorf("astits: parsing PSI table failed: %w", err)
+			return
+		}
+
+		// Make sure each section makes the iterator move forward so that corrupted section lengths can't
+		// make us parse the same section over and over again.
+		if i.Offset() <= offsetBefore {
+			err = fmt.Errorf("astits: parsing PSI table failed: section at offset %d didn't move the iterator forward", offsetBefore)
 			return
 		}
 		d.Sections = append(d.Sections, s)
@@ -459,21 +467,46 @@ func parsePSISectionSyntaxData(i *astikit.BytesIterator, h *PSISectionHeader, sh
 func (d *PSIData) toData(firstPacket *Packet, pid uint16) (ds []*DemuxerData) {
 	// Loop through sections
 	for _, s := range d.Sections {
+		// Ignore empty sections: a corrupted section can have no header, no syntax section or no table data
+		// (e.g. a section whose length is 0) and dereferencing those would panic.
+		if s == nil || s.Header == nil || s.Syntax == nil || s.Syntax.Data == nil {
+			continue
+		}
+
+		var data *DemuxerData
+
 		// Switch on table type
 		switch s.Header.TableID {
 		case PSITableIDNITVariant1, PSITableIDNITVariant2:
-			ds = append(ds, &DemuxerData{FirstPacket: firstPacket, NIT: s.Syntax.Data.NIT, PID: pid})
+			if s.Syntax.Data.NIT != nil {
+				data = &DemuxerData{FirstPacket: firstPacket, NIT: s.Syntax.Data.NIT, PID: pid}
+			}
 		case PSITableIDPAT:
-			ds = append(ds, &DemuxerData{FirstPacket: firstPacket, PAT: s.Syntax.Data.PAT, PID: pid})
+			if s.Syntax.Data.PAT != nil {
+				data = &DemuxerData{FirstPacket: firstPacket, PAT: s.Syntax.Data.PAT, PID: pid}
+			}
 		case PSITableIDPMT:
-			ds = append(ds, &DemuxerData{FirstPacket: firstPacket, PID: pid, PMT: s.Syntax.Data.PMT})
+			if s.Syntax.Data.PMT != nil {
+				data = &DemuxerData{FirstPacket: firstPacket, PID: pid, PMT: s.Syntax.Data.PMT}
+			}
 		case PSITableIDSDTVariant1, PSITableIDSDTVariant2:
-			ds = append(ds, &DemuxerData{FirstPacket: firstPacket, PID: pid, SDT: s.Syntax.Data.SDT})
+			if s.Syntax.Data.SDT != nil {
+				data = &DemuxerData{FirstPacket: firstPacket, PID: pid, SDT: s.Syntax.Data.SDT}
+			}
 		case PSITableIDTOT:
-			ds = append(ds, &DemuxerData{FirstPacket: firstPacket, PID: pid, TOT: s.Syntax.Data.TOT})
+			if s.Syntax.Data.TOT != nil {
+				data = &DemuxerData{FirstPacket: firstPacket, PID: pid, TOT: s.Syntax.Data.TOT}
+			}
 		}
 		if s.Header.TableID >= PSITableIDEITStart && s.Header.TableID <= PSITableIDEITEnd {
-			ds = append(ds, &DemuxerData{EIT: s.Syntax.Data.EIT, FirstPacket: firstPacket, PID: pid})
+			if s.Syntax.Data.EIT != nil {
+				data = &DemuxerData{EIT: s.Syntax.Data.EIT, FirstPacket: firstPacket, PID: pid}
+			}
+		}
+
+		// Append data
+		if data != nil {
+			ds = append(ds, data)
 		}
 	}
 	return
