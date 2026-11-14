@@ -1299,6 +1299,12 @@ func parseDescriptors(i *astikit.BytesIterator) (o []*Descriptor, err error) {
 				// previously therefore we must fetch bytes in descriptor functions and seek at the end
 				offsetDescriptorEnd := i.Offset() + int(d.Length)
 
+				// Make sure a truncated descriptor is reported instead of being silently skipped
+				if offsetDescriptorEnd > i.Len() {
+					err = fmt.Errorf("astits: descriptor tag %d declares length %d exceeding remaining input", d.Tag, d.Length)
+					return
+				}
+
 				// User defined
 				if d.Tag >= 0x80 && d.Tag <= 0xfe {
 					// Get next bytes
@@ -1997,7 +2003,72 @@ func writeDescriptorUnknown(w *astikit.BitsWriter, d *DescriptorUnknown) error {
 	return b.Err()
 }
 
+// descriptorPayloadIsNil returns true when the descriptor carries no payload for its tag.
+// This happens with zero-length descriptors: only the tag and a zero length are
+// meaningful and no structured field must be accessed.
+func descriptorPayloadIsNil(d *Descriptor) bool {
+	if d.Tag >= 0x80 && d.Tag <= 0xfe {
+		return d.UserDefined == nil
+	}
+
+	switch d.Tag {
+	case DescriptorTagAC3:
+		return d.AC3 == nil
+	case DescriptorTagAVCVideo:
+		return d.AVCVideo == nil
+	case DescriptorTagComponent:
+		return d.Component == nil
+	case DescriptorTagContent:
+		return d.Content == nil
+	case DescriptorTagDataStreamAlignment:
+		return d.DataStreamAlignment == nil
+	case DescriptorTagEnhancedAC3:
+		return d.EnhancedAC3 == nil
+	case DescriptorTagExtendedEvent:
+		return d.ExtendedEvent == nil
+	case DescriptorTagExtension:
+		return d.Extension == nil
+	case DescriptorTagISO639LanguageAndAudioType:
+		return d.ISO639LanguageAndAudioType == nil
+	case DescriptorTagLocalTimeOffset:
+		return d.LocalTimeOffset == nil
+	case DescriptorTagMaximumBitrate:
+		return d.MaximumBitrate == nil
+	case DescriptorTagNetworkName:
+		return d.NetworkName == nil
+	case DescriptorTagParentalRating:
+		return d.ParentalRating == nil
+	case DescriptorTagPrivateDataIndicator:
+		return d.PrivateDataIndicator == nil
+	case DescriptorTagPrivateDataSpecifier:
+		return d.PrivateDataSpecifier == nil
+	case DescriptorTagRegistration:
+		return d.Registration == nil
+	case DescriptorTagService:
+		return d.Service == nil
+	case DescriptorTagShortEvent:
+		return d.ShortEvent == nil
+	case DescriptorTagStreamIdentifier:
+		return d.StreamIdentifier == nil
+	case DescriptorTagSubtitling:
+		return d.Subtitling == nil
+	case DescriptorTagTeletext:
+		return d.Teletext == nil
+	case DescriptorTagVBIData:
+		return d.VBIData == nil
+	case DescriptorTagVBITeletext:
+		return d.VBITeletext == nil
+	}
+
+	return d.Unknown == nil
+}
+
 func calcDescriptorLength(d *Descriptor) uint8 {
+	// Zero-length descriptors carry no payload
+	if descriptorPayloadIsNil(d) {
+		return 0
+	}
+
 	if d.Tag >= 0x80 && d.Tag <= 0xfe {
 		return calcDescriptorUserDefinedLength(d.UserDefined)
 	}
@@ -2067,6 +2138,12 @@ func writeDescriptor(w *astikit.BitsWriter, d *Descriptor) (int, error) {
 	}
 
 	written := int(length) + 2
+
+	// Zero-length descriptors are made of their tag and zero length only:
+	// there is no structured payload to write
+	if descriptorPayloadIsNil(d) {
+		return written, nil
+	}
 
 	if d.Tag >= 0x80 && d.Tag <= 0xfe {
 		return written, writeDescriptorUserDefined(w, d.UserDefined)
