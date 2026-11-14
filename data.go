@@ -128,6 +128,20 @@ func isPESPayload(i []byte) bool {
 	return uint32(i[0])<<16|uint32(i[1])<<8|uint32(i[2]) == 1
 }
 
+// isPESPacketsPayload checks whether the payload spanning over multiple packets is a PES one
+// The fixed header may be split across packets, so the 3-byte prefix has to be reassembled
+func isPESPacketsPayload(ps []*Packet) bool {
+	var prefix [3]byte
+	var n int
+	for _, p := range ps {
+		n += copy(prefix[n:], p.Payload)
+		if n == len(prefix) {
+			break
+		}
+	}
+	return isPESPayload(prefix[:n])
+}
+
 // isPSIComplete checks whether we have sufficient amount of packets to parse PSI
 func isPSIComplete(ps []*Packet) bool {
 	// Get payload length
@@ -186,10 +200,34 @@ func isPSIComplete(ps []*Packet) bool {
 
 // isPESComplete checks whether payload fully contains PES packet
 func isPESComplete(ps []*Packet) bool {
+	// Read the fixed header, which may be split across packets. It contains the
+	// PES_packet_length needed to decide whether the payload can be complete.
+	var header [6]byte
+	var n int
+	for _, p := range ps {
+		n += copy(header[n:], p.Payload)
+		if n == len(header) {
+			break
+		}
+	}
+
+	// An unbounded PES (length 0) has no way to be known complete, and a
+	// truncated fixed header cannot provide a declared length yet.
+	if n < len(header) || binary.BigEndian.Uint16(header[4:]) == 0 {
+		return false
+	}
+
 	// Get payload length
 	var l int
 	for _, p := range ps {
 		l += len(p.Payload)
+	}
+
+	// PES_packet_length excludes the six-byte fixed header. Bail out before
+	// assembling anything when the declared length has not been received yet:
+	// the incomplete path must not copy the whole (possibly huge) payload.
+	if l < len(header)+int(binary.BigEndian.Uint16(header[4:])) {
+		return false
 	}
 
 	// Get the slice for payload from pool

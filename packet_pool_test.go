@@ -127,3 +127,62 @@ func TestPacketPoolUnboundedPESFollowedByOnePacketPES(t *testing.T) {
 	ps = pp.addUnlocked(p4)
 	assert.Equal(t, []*Packet{p3}, ps, "the one-packet PES must be returned by the next flush")
 }
+
+func TestPacketPoolBoundedPESCompletesWithoutNextStart(t *testing.T) {
+	b := newPacketPool(nil)
+	packets := []*Packet{
+		{Header: PacketHeader{PID: 256, ContinuityCounter: 0, HasPayload: true, PayloadUnitStartIndicator: true}, Payload: []byte{0, 0, 1, 0xe0, 0}},
+		{Header: PacketHeader{PID: 256, ContinuityCounter: 1, HasPayload: true}, Payload: []byte{5, 0x80, 0, 0, 42}},
+		{Header: PacketHeader{PID: 256, ContinuityCounter: 2, HasPayload: true}, Payload: []byte{43}},
+	}
+	assert.Empty(t, b.addUnlocked(packets[0]))
+	assert.Empty(t, b.addUnlocked(packets[1]))
+	assert.Equal(t, packets, b.addUnlocked(packets[2]))
+	assert.Empty(t, b.dumpUnlocked())
+}
+
+// A bounded PES is only complete once its declared length has been received: one byte
+// short must not be flushed, whatever the fragmentation.
+func TestPacketPoolBoundedPESIncompleteUntilDeclaredLength(t *testing.T) {
+	full := []byte{0, 0, 1, 0xe0, 0, 5, 0x80, 0, 0, 42, 43}
+	short := []byte{0, 0, 1, 0xe0, 0, 6, 0x80, 0, 0, 42, 43} // Declares one byte more.
+	for _, first := range []int{1, 2, 3, 5} {
+		// One byte short: nothing must be flushed.
+		b := newPacketPool(nil)
+		assert.Empty(t, b.addUnlocked(&Packet{Header: PacketHeader{PID: 256, ContinuityCounter: 0, HasPayload: true, PayloadUnitStartIndicator: true}, Payload: short[:first]}), "first=%d", first)
+		assert.Empty(t, b.addUnlocked(&Packet{Header: PacketHeader{PID: 256, ContinuityCounter: 1, HasPayload: true}, Payload: short[first:6]}), "first=%d", first)
+		assert.Empty(t, b.addUnlocked(&Packet{Header: PacketHeader{PID: 256, ContinuityCounter: 2, HasPayload: true}, Payload: short[6:]}), "first=%d", first)
+
+		// Completing the declared length flushes the whole PES at once.
+		b = newPacketPool(nil)
+		packets := []*Packet{
+			{Header: PacketHeader{PID: 256, ContinuityCounter: 0, HasPayload: true, PayloadUnitStartIndicator: true}, Payload: full[:first]},
+			{Header: PacketHeader{PID: 256, ContinuityCounter: 1, HasPayload: true}, Payload: full[first:6]},
+			{Header: PacketHeader{PID: 256, ContinuityCounter: 2, HasPayload: true}, Payload: full[6:]},
+		}
+		assert.Empty(t, b.addUnlocked(packets[0]), "first=%d", first)
+		assert.Empty(t, b.addUnlocked(packets[1]), "first=%d", first)
+		assert.Equal(t, packets, b.addUnlocked(packets[2]), "first=%d", first)
+		assert.Empty(t, b.dumpUnlocked(), "first=%d", first)
+	}
+}
+
+// A single packet may both complete the previous PES and start a new one: both
+// payloads must be kept, in order.
+func TestPacketPoolCompletedAndStartedPESAreBothKept(t *testing.T) {
+	b := newPacketPool(nil)
+	// Previous PES declares 10 bytes after its fixed header but only 12 bytes are
+	// received before the next payload starts, so it is still pending.
+	previous := []*Packet{
+		{Header: PacketHeader{PID: 256, ContinuityCounter: 0, HasPayload: true, PayloadUnitStartIndicator: true}, Payload: []byte{0, 0, 1, 0xe0, 0, 10, 0x80, 0, 0}},
+		{Header: PacketHeader{PID: 256, ContinuityCounter: 1, HasPayload: true}, Payload: []byte{0, 42, 43}},
+	}
+	// A new PES that is complete within this single packet.
+	next := &Packet{Header: PacketHeader{PID: 256, ContinuityCounter: 2, HasPayload: true, PayloadUnitStartIndicator: true}, Payload: []byte{0, 0, 1, 0xe0, 0, 3, 0x80, 0, 0, 42, 43}}
+
+	assert.Empty(t, b.addUnlocked(previous[0]))
+	assert.Empty(t, b.addUnlocked(previous[1]))
+	// The new payload start flushes the previous PES; the new one stays queued.
+	assert.Equal(t, previous, b.addUnlocked(next))
+	assert.Equal(t, []*Packet{next}, b.dumpUnlocked())
+}
