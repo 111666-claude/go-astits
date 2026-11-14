@@ -50,6 +50,48 @@ func TestWritePMTSection(t *testing.T) {
 	assert.Equal(t, pmtBytes(), buf.Bytes())
 }
 
+func TestPMTSectionZeroLengthDescriptors(t *testing.T) {
+	buf := &bytes.Buffer{}
+	w := astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: buf})
+	w.Write("111")           // Reserved bits
+	w.Write("1010101010101") // PCR PID
+	w.Write("1111")          // Reserved
+	w.Write("000000000100")  // Program info length = 4
+	w.Write(uint8(DescriptorTagAC3))
+	w.Write(uint8(0)) // Zero-length program descriptor
+	w.Write(uint8(0x80))
+	w.Write(uint8(0)) // Zero-length user defined program descriptor
+	w.Write(uint8(StreamTypeMPEG1Audio))
+	w.Write("111")
+	w.Write("0101010101010") // Stream #1 PID
+	w.Write("1111")          // Reserved
+	w.Write("000000000010")  // Stream #1 ES info length = 2
+	w.Write(uint8(DescriptorTagISO639LanguageAndAudioType))
+	w.Write(uint8(0)) // Zero-length ES descriptor
+
+	b := buf.Bytes()
+	d, err := parsePMTSection(astikit.NewBytesIterator(b), len(b), uint16(1))
+	assert.NoError(t, err)
+	assert.Equal(t, &PMTData{
+		ElementaryStreams: []*PMTElementaryStream{{
+			ElementaryPID:               2730,
+			ElementaryStreamDescriptors: []*Descriptor{{Tag: DescriptorTagISO639LanguageAndAudioType}},
+			StreamType:                  StreamTypeMPEG1Audio,
+		}},
+		PCRPID:             5461,
+		ProgramDescriptors: []*Descriptor{{Tag: DescriptorTagAC3}, {Tag: 0x80}},
+		ProgramNumber:      1,
+	}, d)
+
+	// Writing the parsed data back must not panic and must produce the same bytes
+	bufOut := bytes.Buffer{}
+	wOut := astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: &bufOut})
+	n, err := writePMTSection(wOut, d)
+	assert.NoError(t, err)
+	assert.Equal(t, n, bufOut.Len())
+	assert.Equal(t, b, bufOut.Bytes())
+}
+
 func BenchmarkParsePMTSection(b *testing.B) {
 	b.ReportAllocs()
 	bs := pmtBytes()

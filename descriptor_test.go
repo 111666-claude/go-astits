@@ -703,3 +703,128 @@ func BenchmarkParseDescriptor(b *testing.B) {
 		})
 	}
 }
+
+func TestParseDescriptorZeroLength(t *testing.T) {
+	tags := []uint8{
+		DescriptorTagAC3,
+		DescriptorTagAVCVideo,
+		DescriptorTagComponent,
+		DescriptorTagContent,
+		DescriptorTagDataStreamAlignment,
+		DescriptorTagEnhancedAC3,
+		DescriptorTagExtendedEvent,
+		DescriptorTagExtension,
+		DescriptorTagISO639LanguageAndAudioType,
+		DescriptorTagLocalTimeOffset,
+		DescriptorTagMaximumBitrate,
+		DescriptorTagNetworkName,
+		DescriptorTagParentalRating,
+		DescriptorTagPrivateDataIndicator,
+		DescriptorTagPrivateDataSpecifier,
+		DescriptorTagRegistration,
+		DescriptorTagService,
+		DescriptorTagShortEvent,
+		DescriptorTagStreamIdentifier,
+		DescriptorTagSubtitling,
+		DescriptorTagTeletext,
+		DescriptorTagVBIData,
+		DescriptorTagVBITeletext,
+		0x80, // user defined
+		0xfe, // user defined
+		0x01, // unknown
+		0xff, // unknown
+	}
+
+	for _, tag := range tags {
+		// Two consecutive zero-length descriptors with the same tag make sure
+		// the iterator keeps moving forward
+		b := []byte{0x00, 0x04, tag, 0x00, tag, 0x00}
+		ds, err := parseDescriptors(astikit.NewBytesIterator(b))
+		assert.NoError(t, err)
+		if !assert.Len(t, ds, 2) {
+			continue
+		}
+		for _, d := range ds {
+			// Only tag and zero length are set, no structured payload
+			assert.Equal(t, Descriptor{Tag: tag}, *d)
+
+			// Writing back must not panic and must output tag + zero length only
+			buf := bytes.Buffer{}
+			w := astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: &buf})
+			n, err := writeDescriptor(w, d)
+			assert.NoError(t, err)
+			assert.Equal(t, 2, n)
+			assert.Equal(t, []byte{tag, 0x00}, buf.Bytes())
+		}
+	}
+}
+
+func TestParseDescriptorTruncated(t *testing.T) {
+	for _, b := range [][]byte{
+		{0x00, 0x01, 0x6a},                   // descriptor header truncated
+		{0x00, 0x05, 0x6a, 0x05, 0xff},       // AC3: declared length exceeds available payload
+		{0x00, 0x04, 0x0a, 0x04, 'e', 'n'},   // ISO639: declared length exceeds available payload
+		{0x00, 0x05, 0x01, 0x05, 0xaa},       // unknown: declared length exceeds available payload
+		{0x00, 0x04, 0x52, 0x02, 0x07},       // stream identifier: declared length exceeds available payload
+		{0x00, 0x06, 0x80, 0x03, 0xaa},       // user defined: declared length exceeds available payload
+		{0x00, 0x04, 0x48, 0x03, 0x01, 0x05}, // service: inner length exceeds available payload
+	} {
+		_, err := parseDescriptors(astikit.NewBytesIterator(b))
+		assert.Error(t, err)
+	}
+}
+
+func TestDescriptorRoundTripZeroLength(t *testing.T) {
+	// Mix of normal and zero-length descriptors
+	payload := []byte{
+		DescriptorTagAC3, 0x01, 0x0f, // AC3 with no optional field
+		0x01, 0x00, // unknown zero-length
+		0x80, 0x00, // user defined zero-length
+		DescriptorTagISO639LanguageAndAudioType, 0x04, 'e', 'n', 'g', AudioTypeCleanEffects,
+		DescriptorTagStreamIdentifier, 0x00, // known tag zero-length
+		DescriptorTagStreamIdentifier, 0x01, 0x07,
+	}
+	b := append([]byte{byte(len(payload) >> 8), byte(len(payload))}, payload...)
+
+	ds, err := parseDescriptors(astikit.NewBytesIterator(b))
+	assert.NoError(t, err)
+	if !assert.Len(t, ds, 6) {
+		return
+	}
+	assert.Equal(t, Descriptor{Tag: 0x01}, *ds[1])
+	assert.Equal(t, Descriptor{Tag: 0x80}, *ds[2])
+	assert.Equal(t, Descriptor{Tag: DescriptorTagStreamIdentifier}, *ds[4])
+
+	// Writing the parsed descriptors back must produce the same bytes
+	buf := bytes.Buffer{}
+	w := astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: &buf})
+	n, err := writeDescriptorsWithLength(w, ds)
+	assert.NoError(t, err)
+	assert.Equal(t, n, buf.Len())
+	expected := append([]byte{0xf0 | byte(len(payload)>>8), byte(len(payload))}, payload...)
+	assert.Equal(t, expected, buf.Bytes())
+}
+
+func FuzzParseDescriptors(f *testing.F) {
+	f.Add([]byte{0x00, 0x02, 0x6a, 0x00})
+	f.Add([]byte{0x00, 0x04, 0x6a, 0x00, 0x52, 0x00})
+	f.Add([]byte{0x00, 0x03, 0x6a, 0x01, 0x0f})
+	f.Add([]byte{0x00, 0x06, 0x0a, 0x04, 'e', 'n', 'g', 0x01})
+	f.Add([]byte{0x00, 0x02, 0x80, 0x00})
+	f.Add([]byte{0x00, 0x05, 0x01, 0x05, 0xaa})
+	f.Fuzz(func(t *testing.T, b []byte) {
+		// Fuzz input must only produce an error or a valid set of descriptors,
+		// it must never panic
+		ds, err := parseDescriptors(astikit.NewBytesIterator(b))
+		if err != nil {
+			return
+		}
+		buf := bytes.Buffer{}
+		w := astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: &buf})
+		if _, err = writeDescriptorsWithLength(w, ds); err != nil {
+			return
+		}
+		// Re-parsing the written output must not panic either
+		_, _ = parseDescriptors(astikit.NewBytesIterator(buf.Bytes()))
+	})
+}

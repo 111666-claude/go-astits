@@ -1299,6 +1299,12 @@ func parseDescriptors(i *astikit.BytesIterator) (o []*Descriptor, err error) {
 				// previously therefore we must fetch bytes in descriptor functions and seek at the end
 				offsetDescriptorEnd := i.Offset() + int(d.Length)
 
+				// The descriptor payload must fit in the remaining bytes
+				if offsetDescriptorEnd > i.Len() {
+					err = fmt.Errorf("astits: descriptor length %d exceeds remaining bytes %d", d.Length, i.Len()-i.Offset())
+					return
+				}
+
 				// User defined
 				if d.Tag >= 0x80 && d.Tag <= 0xfe {
 					// Get next bytes
@@ -1700,7 +1706,9 @@ func calcDescriptorExtensionLength(d *DescriptorExtension) uint8 {
 
 	switch d.Tag {
 	case DescriptorTagExtensionSupplementaryAudio:
-		ret += calcDescriptorExtensionSupplementaryAudioLength(d.SupplementaryAudio)
+		if d.SupplementaryAudio != nil {
+			ret += calcDescriptorExtensionSupplementaryAudioLength(d.SupplementaryAudio)
+		}
 	default:
 		if d.Unknown != nil {
 			ret += len(*d.Unknown)
@@ -1734,9 +1742,11 @@ func writeDescriptorExtension(w *astikit.BitsWriter, d *DescriptorExtension) err
 
 	switch d.Tag {
 	case DescriptorTagExtensionSupplementaryAudio:
-		err := writeDescriptorExtensionSupplementaryAudio(w, d.SupplementaryAudio)
-		if err != nil {
-			return err
+		if d.SupplementaryAudio != nil {
+			err := writeDescriptorExtensionSupplementaryAudio(w, d.SupplementaryAudio)
+			if err != nil {
+				return err
+			}
 		}
 	default:
 		if d.Unknown != nil {
@@ -1997,9 +2007,76 @@ func writeDescriptorUnknown(w *astikit.BitsWriter, d *DescriptorUnknown) error {
 	return b.Err()
 }
 
+// hasPayload reports whether the descriptor carries the structured payload
+// matching its tag. A descriptor parsed from a zero-length descriptor only
+// holds the tag and the length and has no payload at all.
+func (d *Descriptor) hasPayload() bool {
+	if d.Tag >= 0x80 && d.Tag <= 0xfe {
+		// User defined payload is a plain byte slice, nil is a valid empty payload
+		return true
+	}
+
+	switch d.Tag {
+	case DescriptorTagAC3:
+		return d.AC3 != nil
+	case DescriptorTagAVCVideo:
+		return d.AVCVideo != nil
+	case DescriptorTagComponent:
+		return d.Component != nil
+	case DescriptorTagContent:
+		return d.Content != nil
+	case DescriptorTagDataStreamAlignment:
+		return d.DataStreamAlignment != nil
+	case DescriptorTagEnhancedAC3:
+		return d.EnhancedAC3 != nil
+	case DescriptorTagExtendedEvent:
+		return d.ExtendedEvent != nil
+	case DescriptorTagExtension:
+		return d.Extension != nil
+	case DescriptorTagISO639LanguageAndAudioType:
+		return d.ISO639LanguageAndAudioType != nil
+	case DescriptorTagLocalTimeOffset:
+		return d.LocalTimeOffset != nil
+	case DescriptorTagMaximumBitrate:
+		return d.MaximumBitrate != nil
+	case DescriptorTagNetworkName:
+		return d.NetworkName != nil
+	case DescriptorTagParentalRating:
+		return d.ParentalRating != nil
+	case DescriptorTagPrivateDataIndicator:
+		return d.PrivateDataIndicator != nil
+	case DescriptorTagPrivateDataSpecifier:
+		return d.PrivateDataSpecifier != nil
+	case DescriptorTagRegistration:
+		return d.Registration != nil
+	case DescriptorTagService:
+		return d.Service != nil
+	case DescriptorTagShortEvent:
+		return d.ShortEvent != nil
+	case DescriptorTagStreamIdentifier:
+		return d.StreamIdentifier != nil
+	case DescriptorTagSubtitling:
+		return d.Subtitling != nil
+	case DescriptorTagTeletext:
+		return d.Teletext != nil
+	case DescriptorTagVBIData:
+		return d.VBIData != nil
+	case DescriptorTagVBITeletext:
+		return d.VBITeletext != nil
+	}
+
+	return d.Unknown != nil
+}
+
 func calcDescriptorLength(d *Descriptor) uint8 {
 	if d.Tag >= 0x80 && d.Tag <= 0xfe {
 		return calcDescriptorUserDefinedLength(d.UserDefined)
+	}
+
+	// Descriptors without payload (e.g. parsed from a zero-length descriptor)
+	// have a zero length
+	if !d.hasPayload() {
+		return 0
 	}
 
 	switch d.Tag {
@@ -2070,6 +2147,12 @@ func writeDescriptor(w *astikit.BitsWriter, d *Descriptor) (int, error) {
 
 	if d.Tag >= 0x80 && d.Tag <= 0xfe {
 		return written, writeDescriptorUserDefined(w, d.UserDefined)
+	}
+
+	// Descriptors without payload (e.g. parsed from a zero-length descriptor)
+	// are written back as tag and zero length only
+	if !d.hasPayload() {
+		return written, nil
 	}
 
 	switch d.Tag {
