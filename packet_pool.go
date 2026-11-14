@@ -23,6 +23,13 @@ func newPacketAccumulator(pid uint16, programMap *programMap) *packetAccumulator
 func (b *packetAccumulator) add(p *Packet) (ps []*Packet) {
 	mps := b.q
 
+	// Throw away packet if it's the same as the previous one. This must happen before
+	// the discontinuity check: a repeated continuity counter is a duplicate, not a
+	// loss, and the payload built so far must be preserved.
+	if isSameAsPrevious(mps, p) {
+		return
+	}
+
 	// Empty buffer if we detect a discontinuity
 	if hasDiscontinuity(mps, p) {
 		// Reset current slice or make new
@@ -31,11 +38,6 @@ func (b *packetAccumulator) add(p *Packet) (ps []*Packet) {
 		} else {
 			mps = make([]*Packet, 0, 10)
 		}
-	}
-
-	// Throw away packet if it's the same as the previous one
-	if isSameAsPrevious(mps, p) {
-		return
 	}
 
 	// Flush buffer if new payload starts here
@@ -116,11 +118,34 @@ func (b *packetPool) dumpUnlocked() (ps []*Packet) {
 	return
 }
 
-// hasDiscontinuity checks whether a packet is discontinuous with a set of packets
+// hasDiscontinuity checks whether a packet is discontinuous with a set of packets.
+// A nil or empty set means this is the first packet of the track and can't be discontinuous.
 func hasDiscontinuity(ps []*Packet, p *Packet) bool {
+	// Null packets are padding: they don't belong to any track and their continuity
+	// counter must never be interpreted as a loss for the track being handled.
+	if p.Header.PID == PIDNull {
+		return false
+	}
+
+	// An explicit discontinuity indicator means the counter jump is expected (e.g.
+	// after a channel switch), so it must not be reported as packet loss.
+	if p.Header.HasAdaptationField && p.AdaptationField != nil && p.AdaptationField.DiscontinuityIndicator {
+		return false
+	}
+
+	// The first packet of an empty set can't be compared to anything.
 	l := len(ps)
-	return (p.Header.HasAdaptationField && p.AdaptationField.DiscontinuityIndicator) || (l > 0 && ((p.Header.HasPayload && p.Header.ContinuityCounter != (ps[l-1].Header.ContinuityCounter+1)%16) ||
-		(!p.Header.HasPayload && p.Header.ContinuityCounter != ps[l-1].Header.ContinuityCounter)))
+	if l == 0 {
+		return false
+	}
+
+	// Packets with a payload increment the 4-bit continuity counter and wrap around;
+	// packets without a payload must repeat the previous counter.
+	expected := ps[l-1].Header.ContinuityCounter
+	if p.Header.HasPayload {
+		expected = (expected + 1) & 0x0f
+	}
+	return p.Header.ContinuityCounter != expected
 }
 
 // isSameAsPrevious checks whether a packet is the same as the last packet of a set of packets
