@@ -1,10 +1,38 @@
 package astits
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/asticode/go-astikit"
 )
+
+// ErrCRC32Mismatch is the stable sentinel error wrapped by a
+// *CRC32MismatchError when the CRC32 carried by a PSI section differs from the
+// value computed over the section bytes. Callers must rely on
+// errors.Is(err, ErrCRC32Mismatch) instead of matching against the
+// human-readable message, whose wording may change.
+var ErrCRC32Mismatch = errors.New("astits: CRC32 mismatch")
+
+// CRC32MismatchError is returned when the CRC32 stored in a PSI section
+// doesn't match the CRC32 computed over the section. It wraps
+// ErrCRC32Mismatch so that errors.Is keeps matching through any number of
+// fmt.Errorf("%w") wrapping layers, while exposing both checksum values.
+type CRC32MismatchError struct {
+	TableCRC32    uint32 // CRC32 value carried by the table
+	ComputedCRC32 uint32 // CRC32 value computed over the section
+}
+
+// Error implements the error interface. The historical message format,
+// including both hexadecimal checksum values, is preserved.
+func (e *CRC32MismatchError) Error() string {
+	return fmt.Sprintf("astits: Table CRC32 %x != computed CRC32 %x", e.TableCRC32, e.ComputedCRC32)
+}
+
+// Unwrap exposes the stable sentinel for errors.Is/errors.As chains.
+func (e *CRC32MismatchError) Unwrap() error {
+	return ErrCRC32Mismatch
+}
 
 // PSI table IDs
 const (
@@ -175,7 +203,7 @@ func parsePSISection(i *astikit.BytesIterator) (s *PSISection, stop bool, err er
 
 			// Check CRC32
 			if crc32 != s.CRC32 {
-				err = fmt.Errorf("astits: Table CRC32 %x != computed CRC32 %x", s.CRC32, crc32)
+				err = &CRC32MismatchError{TableCRC32: s.CRC32, ComputedCRC32: crc32}
 				return
 			}
 		}
