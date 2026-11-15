@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 
 	"github.com/asticode/go-astikit"
@@ -181,12 +182,35 @@ func (m *Muxer) SetPCRPID(pid uint16) {
 }
 
 // WriteData writes MuxerData to TS stream
-// Currently only PES packets are supported
+// PES packets are supported, as well as SCTE-35 splice_info_sections: when
+// d.SCTE35 is set, the section is serialized and carried in a PES packet on
+// the given PID (the PID must have been added with StreamTypeSCTE35).
 // Be aware that after successful call WriteData will set d.AdaptationField.StuffingLength value to zero
 func (m *Muxer) WriteData(d *MuxerData) (int, error) {
 	ctx, ok := m.esContexts[uint32(d.PID)]
 	if !ok {
 		return 0, ErrPIDNotFound
+	}
+
+	// Serialize an SCTE-35 cue into the PES packet that the regular PES
+	// packetization path then fragments across TS packets.
+	if d.SCTE35 != nil {
+		if ctx.es.StreamType != StreamTypeSCTE35 {
+			return 0, fmt.Errorf("astits: PID %d is not an SCTE-35 stream (stream type 0x%02x)", d.PID, ctx.es.StreamType)
+		}
+		section, err := WriteSCTE35SpliceInfoSection(d.SCTE35)
+		if err != nil {
+			return 0, err
+		}
+		d.PES = &PESData{
+			Data: section,
+			Header: &PESHeader{
+				StreamID: StreamIDSCTE35,
+				OptionalHeader: &PESOptionalHeader{
+					HasOptionalFields: true,
+				},
+			},
+		}
 	}
 
 	bytesWritten := 0

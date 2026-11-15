@@ -253,6 +253,10 @@ func (t StreamType) ToPESStreamID() uint8 {
 		return 0xfd
 	case StreamTypePrivateSection, StreamTypePrivateData, StreamTypeMetadata:
 		return 0xfc
+	case StreamTypeSCTE35:
+		// SCTE-35 splice_info_sections are carried in PES packets using
+		// stream_id 0xFC (ANSI/SCTE 35-2020, 8.1).
+		return StreamIDSCTE35
 	default:
 		return 0xbd
 	}

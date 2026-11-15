@@ -203,7 +203,7 @@ func (dmx *Demuxer) updateData(ds []*DemuxerData) (d *DemuxerData) {
 			}
 			if v.PMT != nil {
 				for _, es := range v.PMT.ElementaryStreams {
-					dmx.streamMap.setUnlocked(es.ElementaryPID, v.PMT.ProgramNumber)
+					dmx.streamMap.setStreamUnlocked(es.ElementaryPID, v.PMT.ProgramNumber, es.StreamType)
 				}
 			}
 		}

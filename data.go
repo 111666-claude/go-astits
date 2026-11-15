@@ -24,6 +24,7 @@ type DemuxerData struct {
 	PID         uint16
 	PMT         *PMTData
 	SDT         *SDTData
+	SCTE35      *SCTE35SpliceInfoSection
 	TOT         *TOTData
 }
 
@@ -32,6 +33,7 @@ type MuxerData struct {
 	PID             uint16
 	AdaptationField *PacketAdaptationField
 	PES             *PESData
+	SCTE35          *SCTE35SpliceInfoSection
 }
 
 // parseData parses a payload spanning over multiple packets and returns a set of data
@@ -94,6 +96,25 @@ func parseData(ps []*Packet, prs PacketsParser, pm *programMap, esm *elementaryS
 		var pesData *PESData
 		if pesData, err = parsePESData(i); err != nil {
 			err = fmt.Errorf("astits: parsing PES data failed: %w", err)
+			return
+		}
+
+		// SCTE-35 splice_info_sections ride in PES packets of streams
+		// declared with stream type 0x86 in the PMT.
+		if st, ok := esm.streamTypeUnlocked(pid); ok && st == StreamTypeSCTE35 {
+			var scte35Data *SCTE35SpliceInfoSection
+			if scte35Data, err = parseSCTE35FromPESData(pesData); err != nil {
+				err = fmt.Errorf("astits: parsing SCTE-35 splice_info_section failed: %w", err)
+				return
+			}
+			ds = []*DemuxerData{
+				{
+					FirstPacket: fp,
+					PES:         pesData,
+					PID:         pid,
+					SCTE35:      scte35Data,
+				},
+			}
 			return
 		}
 

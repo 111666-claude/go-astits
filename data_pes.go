@@ -25,6 +25,9 @@ const (
 	StreamIDPrivateStream1 = 189
 	StreamIDPaddingStream  = 190
 	StreamIDPrivateStream2 = 191
+	// StreamIDSCTE35 is the PES stream_id carrying SCTE-35 splice_info_sections
+	// (ANSI/SCTE 35-2020, 8.1).
+	StreamIDSCTE35 = 0xfc
 )
 
 // Trick mode controls

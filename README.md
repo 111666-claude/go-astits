@@ -124,6 +124,63 @@ mx.WriteData(&astits.MuxerData{
 })
 ```
 
+## SCTE-35 splice_info_section
+
+SCTE-35 cues (SCTE standard 35) are carried in PES packets of an elementary
+stream advertised with stream type `0x86` (`StreamTypeSCTE35`) in the PMT.
+Sections that span several TS packets are reassembled automatically.
+
+### Demux a cue
+
+`time_signal`, `splice_insert` (including cancellation, components, PTS
+adjustment and break duration), `splice_schedule`, `splice_null`,
+`bandwidth_reservation`, `private_command` and segmentation descriptors are
+exposed in a structured form. Unknown splice commands and descriptors are
+preserved byte for byte so a section can always be written back losslessly.
+
+```go
+d, err := dmx.NextData()
+if err != nil {
+    log.Fatal(err)
+}
+if d.SCTE35 != nil {
+    // d.SCTE35 is a *SCTE35SpliceInfoSection
+    if d.SCTE35.SpliceCommand.Type == astits.SCTE35SpliceCommandTypeTimeSignal {
+        pts := d.SCTE35.AdjustedPTS(d.SCTE35.SpliceCommand.TimeSignal.PTS)
+        log.Printf("cue at adjusted PTS %d", pts)
+    }
+}
+```
+
+### Mux a cue
+
+Add an SCTE-35 elementary stream, then pass a structured section through
+`WriteData`. The section is serialized, CRC32 included, and packetized.
+
+```go
+mx.AddElementaryStream(astits.PMTElementaryStream{
+    ElementaryPID: 0x1f0,
+    StreamType:    astits.StreamTypeSCTE35,
+})
+mx.WriteData(&astits.MuxerData{
+    PID: 0x1f0,
+    SCTE35: &astits.SCTE35SpliceInfoSection{
+        SpliceCommand: &astits.SCTE35SpliceCommand{
+            Type: astits.SCTE35SpliceCommandTypeTimeSignal,
+            TimeSignal: &astits.SCTE35SpliceTime{
+                TimeSpecified: true,
+                PTS:           pts,
+            },
+        },
+    },
+})
+```
+
+PTS fields are 33-bit values; `SCTE35AdjustedPTS` applies `pts_adjustment`
+modulo 2^33 so wrap-around is handled per the standard. Sections are
+validated (table id, section length, reserved bits, truncation and CRC32)
+and invalid input returns an error.
+
 ## Options
 
 In order to pass options to the demuxer or the muxer, look for the methods prefixed with `DemuxerOpt` or `MuxerOpt` and add them upon calling `NewDemuxer` or `NewMuxer` :
@@ -195,3 +252,5 @@ This library provides 2 CLIs that will automatically get installed in `GOPATH/bi
 - [ ] Mux TDT packets
 - [ ] Demux TSDT packets
 - [ ] Mux TSDT packets
+- [x] Demux SCTE-35 splice_info_section packets
+- [x] Mux SCTE-35 splice_info_section packets
