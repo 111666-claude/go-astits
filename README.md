@@ -191,7 +191,7 @@ This library provides 2 CLIs that will automatically get installed in `GOPATH/bi
 - [ ] Demux SIT packets
 - [ ] Mux SIT packets
 - [ ] Mux ST packets
-- [ ] Demux TDT packets
-- [ ] Mux TDT packets
+- [x] Demux TDT packets
+- [x] Mux TDT packets
 - [ ] Demux TSDT packets
 - [ ] Mux TSDT packets

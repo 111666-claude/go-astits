@@ -94,6 +94,7 @@ type PSISectionSyntaxData struct {
 	PAT *PATData
 	PMT *PMTData
 	SDT *SDTData
+	TDT *TDTData
 	TOT *TOTData
 }
 
@@ -439,13 +440,16 @@ func parsePSISectionSyntaxData(i *astikit.BytesIterator, h *PSISectionHeader, sh
 		// TODO Parse SIT
 	case PSITableIDST:
 		// TODO Parse ST
+	case PSITableIDTDT:
+		if d.TDT, err = parseTDTSection(i, h); err != nil {
+			err = fmt.Errorf("astits: parsing TDT section failed: %w", err)
+			return
+		}
 	case PSITableIDTOT:
 		if d.TOT, err = parseTOTSection(i); err != nil {
 			err = fmt.Errorf("astits: parsing TOT section failed: %w", err)
 			return
 		}
-	case PSITableIDTDT:
-		// TODO Parse TDT
 	}
 
 	if h.TableID >= PSITableIDEITStart && h.TableID <= PSITableIDEITEnd {
@@ -478,6 +482,8 @@ func (d *PSIData) toData(firstPacket *Packet, pid uint16) (ds []*DemuxerData) {
 			ds = append(ds, &DemuxerData{FirstPacket: firstPacket, PID: pid, PMT: s.Syntax.Data.PMT})
 		case PSITableIDSDTVariant1, PSITableIDSDTVariant2:
 			ds = append(ds, &DemuxerData{FirstPacket: firstPacket, PID: pid, SDT: s.Syntax.Data.SDT})
+		case PSITableIDTDT:
+			ds = append(ds, &DemuxerData{FirstPacket: firstPacket, PID: pid, TDT: s.Syntax.Data.TDT})
 		case PSITableIDTOT:
 			ds = append(ds, &DemuxerData{FirstPacket: firstPacket, PID: pid, TOT: s.Syntax.Data.TOT})
 		}
@@ -523,6 +529,8 @@ func calcPSISectionLength(s *PSISection) uint16 {
 		ret += calcPATSectionLength(s.Syntax.Data.PAT)
 	case PSITableIDPMT:
 		ret += calcPMTSectionLength(s.Syntax.Data.PMT)
+	case PSITableIDTDT:
+		ret += tdtSectionLength
 	}
 
 	if s.Header.TableID.hasCRC32() {
@@ -533,7 +541,7 @@ func calcPSISectionLength(s *PSISection) uint16 {
 }
 
 func writePSISection(w *astikit.BitsWriter, s *PSISection) (int, error) {
-	if s.Header.TableID != PSITableIDPAT && s.Header.TableID != PSITableIDPMT {
+	if s.Header.TableID != PSITableIDPAT && s.Header.TableID != PSITableIDPMT && s.Header.TableID != PSITableIDTDT {
 		return 0, fmt.Errorf("writePSISection: table %s is not implemented", s.Header.TableID.Type())
 	}
 
@@ -611,6 +619,8 @@ func writePSISectionSyntaxData(w *astikit.BitsWriter, d *PSISectionSyntaxData, t
 		return writePATSection(w, d.PAT)
 	case PSITableIDPMT:
 		return writePMTSection(w, d.PMT)
+	case PSITableIDTDT:
+		return writeTDTSection(w, d.TDT)
 	}
 
 	return 0, nil

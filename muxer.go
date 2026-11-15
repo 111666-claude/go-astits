@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"time"
 
 	"github.com/asticode/go-astikit"
 )
@@ -41,6 +42,7 @@ type Muxer struct {
 	pmtVersion wrappingCounter
 	patCC      wrappingCounter
 	pmtCC      wrappingCounter
+	tdtCC      wrappingCounter
 
 	patBytes bytes.Buffer
 	pmtBytes bytes.Buffer
@@ -111,6 +113,7 @@ func NewMuxer(ctx context.Context, w io.Writer, opts ...func(*Muxer)) *Muxer {
 
 		patCC: newWrappingCounter(0b1111),
 		pmtCC: newWrappingCounter(0b1111),
+		tdtCC: newWrappingCounter(0b1111),
 
 		esContexts: map[uint32]*esContext{},
 	}
@@ -298,6 +301,47 @@ func (m *Muxer) WriteData(d *MuxerData) (int, error) {
 // Stuffs with 0xffs if packet turns out to be shorter than target packet length
 func (m *Muxer) WritePacket(p *Packet) (int, error) {
 	return writePacket(m.bitsWriter, p, m.packetSize)
+}
+
+// WriteTDT writes a single Time and Date Table packet carrying t on PID 0x14.
+// It is only emitted when explicitly called: PAT/PMT retransmission and PES writing are
+// unaffected, and the TDT keeps its own continuity counter.
+// The time is encoded as a DVB UTC time (MJD date + BCD time); an error is returned when it
+// cannot be represented (out of the 16-bit MJD range or with sub-second precision).
+func (m *Muxer) WriteTDT(t time.Time) (int, error) {
+	section := &PSISection{
+		Header: &PSISectionHeader{
+			// EN 300 468 5.2.5: section_syntax_indicator = 0, reserved_future_use (private bit) = 1.
+			PrivateBit:             true,
+			SectionLength:          tdtSectionLength,
+			SectionSyntaxIndicator: false,
+			TableID:                PSITableIDTDT,
+			TableType:              PSITableTypeTDT,
+		},
+		Syntax: &PSISectionSyntax{
+			Data: &PSISectionSyntaxData{TDT: &TDTData{UTCTime: t}},
+		},
+	}
+	psiData := &PSIData{
+		PointerField: 0,
+		Sections:     []*PSISection{section},
+	}
+
+	m.buf.Reset()
+	if _, err := writePSIData(m.bufWriter, psiData); err != nil {
+		return 0, err
+	}
+
+	pkt := Packet{
+		Header: PacketHeader{
+			ContinuityCounter:         uint8(m.tdtCC.inc()),
+			HasPayload:                true,
+			PayloadUnitStartIndicator: true,
+			PID:                       PIDTDT,
+		},
+		Payload: m.buf.Bytes(),
+	}
+	return writePacket(m.bitsWriter, &pkt, m.packetSize)
 }
 
 func (m *Muxer) retransmitTables(force bool) (int, error) {

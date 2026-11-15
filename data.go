@@ -24,6 +24,7 @@ type DemuxerData struct {
 	PID         uint16
 	PMT         *PMTData
 	SDT         *SDTData
+	TDT         *TDTData
 	TOT         *TOTData
 }
 
