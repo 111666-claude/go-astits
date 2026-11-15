@@ -140,6 +140,52 @@ p := func(ps []*astits.Packet) (ds []*astits.Data, skip bool, err error) {
 dmx := NewDemuxer(ctx, f, DemuxerOptPacketSize(192), DemuxerOptPacketsParser(p))
 ```
 
+## Filter one program out of a multi-program stream
+
+A transport stream may carry several programs. `ProgramRemuxer` filters a
+single program out and rewrites the stream as a standalone, player-ready
+transport stream, working at the TS packet level:
+
+- the PAT and PMT are regenerated so they only describe the requested program;
+  elementary streams, descriptors (including unknown/private ones) and the PCR
+  relationship are preserved, CRC32 values are recomputed;
+- packets of the program's elementary streams are forwarded untouched apart
+  from their PID (when remapped) and their continuity counter, which is
+  renumbered per output PID. PES payloads, PTS/DTS and PCR values are never
+  modified;
+- packets of other programs, unrelated SI tables, unknown PIDs and null
+  packets are dropped.
+
+```go
+// Open the multi-program input
+f, _ := os.Open("/path/to/multi_program.ts")
+defer f.Close()
+out, _ := os.Create("/path/to/single_program.ts")
+defer out.Close()
+
+// Export only program 101
+stats, err := astits.RemuxProgram(ctx, f, out, 101)
+
+// Corrupt packets, dropped packets and PSI errors are reported in stats rather
+// than aborting the export. A missing target program or PMT is returned as
+// astits.ErrProgramNotFound / astits.ErrPMTNotFound.
+```
+
+PIDs can be remapped explicitly, or reassigned automatically to avoid
+collisions when merging streams:
+
+```go
+mux := astits.NewProgramRemuxer(ctx, f, out, 101,
+    astits.RemuxerOptPIDRemap(0x0101, 0x0301), // explicit remap
+    astits.RemuxerOptAutoRemapPIDs(),          // or collision-free auto PIDs
+)
+err := mux.Remux()
+```
+
+Mid-stream PMT updates are applied (the PMT version is bumped), invalid PMTs
+and corrupted PSI sections make the remuxer keep the previous valid tables,
+and `Rewind()` resets the remuxer so the same reader can be processed again.
+
 # CLI
 
 This library provides 2 CLIs that will automatically get installed in `GOPATH/bin` on `go get` execution.
