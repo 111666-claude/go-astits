@@ -523,6 +523,8 @@ func calcPSISectionLength(s *PSISection) uint16 {
 		ret += calcPATSectionLength(s.Syntax.Data.PAT)
 	case PSITableIDPMT:
 		ret += calcPMTSectionLength(s.Syntax.Data.PMT)
+	case PSITableIDSDTVariant1, PSITableIDSDTVariant2:
+		ret += calcSDTSectionLength(s.Syntax.Data.SDT)
 	}
 
 	if s.Header.TableID.hasCRC32() {
@@ -533,7 +535,10 @@ func calcPSISectionLength(s *PSISection) uint16 {
 }
 
 func writePSISection(w *astikit.BitsWriter, s *PSISection) (int, error) {
-	if s.Header.TableID != PSITableIDPAT && s.Header.TableID != PSITableIDPMT {
+	if s.Header.TableID != PSITableIDPAT &&
+		s.Header.TableID != PSITableIDPMT &&
+		s.Header.TableID != PSITableIDSDTVariant1 &&
+		s.Header.TableID != PSITableIDSDTVariant2 {
 		return 0, fmt.Errorf("writePSISection: table %s is not implemented", s.Header.TableID.Type())
 	}
 
@@ -611,6 +616,8 @@ func writePSISectionSyntaxData(w *astikit.BitsWriter, d *PSISectionSyntaxData, t
 		return writePATSection(w, d.PAT)
 	case PSITableIDPMT:
 		return writePMTSection(w, d.PMT)
+	case PSITableIDSDTVariant1, PSITableIDSDTVariant2:
+		return writeSDTSection(w, d.SDT)
 	}
 
 	return 0, nil

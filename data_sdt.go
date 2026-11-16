@@ -6,6 +6,13 @@ import (
 	"github.com/asticode/go-astikit"
 )
 
+// Service types
+// Chapter: 6.2.33 | Link: https://www.etsi.org/deliver/etsi_en/300400_300499/300468/01.15.01_60/en_300468v011501p.pdf
+const (
+	ServiceTypeDigitalTelevision uint8 = 0x01
+	ServiceTypeDigitalRadio      uint8 = 0x02
+)
+
 // Running statuses
 const (
 	RunningStatusNotRunning          = 1
@@ -105,4 +112,42 @@ func parseSDTSection(i *astikit.BytesIterator, offsetSectionsEnd int, tableIDExt
 		d.Services = append(d.Services, s)
 	}
 	return
+}
+
+const sdtServiceHeaderBytesSize = 5 // service_id (16) + flags (8) + running_status/free_ca_mode/descriptors_loop_length (16)
+
+func calcSDTSectionLength(d *SDTData) uint16 {
+	ret := uint16(3) // original_network_id (16) + reserved (8)
+	for _, s := range d.Services {
+		ret += sdtServiceHeaderBytesSize
+		ret += calcDescriptorsLength(s.Descriptors)
+	}
+	return ret
+}
+
+func writeSDTSection(w *astikit.BitsWriter, d *SDTData) (int, error) {
+	b := astikit.NewBitsWriterBatch(w)
+
+	b.Write(d.OriginalNetworkID)
+	b.Write(uint8(0xff)) // reserved for future use
+	bytesWritten := 3
+
+	for _, s := range d.Services {
+		b.Write(s.ServiceID)
+		b.WriteN(uint8(0xff), 6) // reserved for future use
+		b.Write(s.HasEITSchedule)
+		b.Write(s.HasEITPresentFollowing)
+		b.WriteN(s.RunningStatus, 3)
+		b.Write(s.HasFreeCSAMode)
+		b.WriteN(calcDescriptorsLength(s.Descriptors), 12)
+		bytesWritten += sdtServiceHeaderBytesSize
+
+		n, err := writeDescriptors(w, s.Descriptors)
+		if err != nil {
+			return 0, err
+		}
+		bytesWritten += n
+	}
+
+	return bytesWritten, b.Err()
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 
 	"github.com/asticode/go-astikit"
@@ -19,6 +20,12 @@ var (
 	ErrPIDNotFound      = errors.New("astits: PID not found")
 	ErrPIDAlreadyExists = errors.New("astits: PID already exists")
 	ErrPCRPIDInvalid    = errors.New("astits: PCR PID invalid")
+
+	ErrSDTServiceNotFound   = errors.New("astits: SDT service ID doesn't match any program")
+	ErrSDTNameTooLong       = errors.New("astits: SDT service name is too long")
+	ErrSDTProviderTooLong   = errors.New("astits: SDT provider name is too long")
+	ErrSDTSectionDoesNotFit = errors.New("astits: SDT section doesn't fit into a single TS packet")
+	maxSDTStringLength      = 255 // service name and provider name are length-prefixed with a single byte
 )
 
 type Muxer struct {
@@ -30,6 +37,7 @@ type Muxer struct {
 	tablesRetransmitPeriod int // period in PES packets
 
 	transportStreamID uint16
+	originalNetworkID uint16
 	pmtPID            uint16
 
 	pm         *programMap // pid -> programNumber
@@ -42,8 +50,15 @@ type Muxer struct {
 	patCC      wrappingCounter
 	pmtCC      wrappingCounter
 
+	sdt        SDTData
+	sdtEnabled bool
+	sdtUpdated bool
+	sdtVersion wrappingCounter
+	sdtCC      wrappingCounter
+
 	patBytes bytes.Buffer
 	pmtBytes bytes.Buffer
+	sdtBytes bytes.Buffer
 
 	buf       bytes.Buffer
 	bufWriter *astikit.BitsWriter
@@ -87,6 +102,14 @@ func WithPMTPID(pid uint16) func(*Muxer) {
 	}
 }
 
+// WithOriginalNetworkID sets the original network ID written into SDT.
+// Default is 0.
+func WithOriginalNetworkID(id uint16) func(*Muxer) {
+	return func(m *Muxer) {
+		m.originalNetworkID = id
+	}
+}
+
 // TODO MuxerOptAutodetectPCRPID selecting first video PID for each PMT, falling back to first audio, falling back to any other
 
 func NewMuxer(ctx context.Context, w io.Writer, opts ...func(*Muxer)) *Muxer {
@@ -108,9 +131,11 @@ func NewMuxer(ctx context.Context, w io.Writer, opts ...func(*Muxer)) *Muxer {
 		// table version is 5-bit field
 		patVersion: newWrappingCounter(0b11111),
 		pmtVersion: newWrappingCounter(0b11111),
+		sdtVersion: newWrappingCounter(0b11111),
 
 		patCC: newWrappingCounter(0b1111),
 		pmtCC: newWrappingCounter(0b1111),
+		sdtCC: newWrappingCounter(0b1111),
 
 		esContexts: map[uint32]*esContext{},
 	}
@@ -178,6 +203,59 @@ func (m *Muxer) RemoveElementaryStream(pid uint16) error {
 func (m *Muxer) SetPCRPID(pid uint16) {
 	m.pmt.PCRPID = pid
 	m.pmtUpdated = true
+}
+
+// SetSDT enables writing an SDT describing the given service alongside PAT and PMT.
+// The service ID must match the program number of an existing program so that receivers
+// can associate the service with the PMT (the muxer currently supports a single program,
+// so it must be 1). The service and provider names are advertised through a service
+// descriptor. Calling SetSDT again updates the SDT content and bumps its version number.
+func (m *Muxer) SetSDT(serviceID uint16, name, provider string) error {
+	if serviceID != m.pmt.ProgramNumber {
+		return fmt.Errorf("%w: %d", ErrSDTServiceNotFound, serviceID)
+	}
+	if len(name) > maxSDTStringLength {
+		return fmt.Errorf("%w: %d bytes", ErrSDTNameTooLong, len(name))
+	}
+	if len(provider) > maxSDTStringLength {
+		return fmt.Errorf("%w: %d bytes", ErrSDTProviderTooLong, len(provider))
+	}
+
+	serviceDescriptor := &DescriptorService{
+		Type:     ServiceTypeDigitalTelevision,
+		Name:     []byte(name),
+		Provider: []byte(provider),
+	}
+
+	sdt := SDTData{
+		OriginalNetworkID: m.originalNetworkID,
+		TransportStreamID: m.transportStreamID,
+		Services: []*SDTDataService{
+			{
+				Descriptors: []*Descriptor{
+					{
+						Tag:     DescriptorTagService,
+						Length:  calcDescriptorServiceLength(serviceDescriptor),
+						Service: serviceDescriptor,
+					},
+				},
+				RunningStatus: RunningStatusRunning,
+				ServiceID:     serviceID,
+			},
+		},
+	}
+
+	// The muxer only supports tables spanning a single TS packet:
+	// pointer field (1) + section header (3) + syntax header (5) + data + CRC32 (4)
+	if 13+int(calcSDTSectionLength(&sdt)) > m.packetSize-mpegTsPacketHeaderSize {
+		return ErrSDTSectionDoesNotFit
+	}
+
+	m.sdt = sdt
+	m.sdtEnabled = true
+	m.sdtUpdated = true
+	m.sdtBytes.Reset()
+	return nil
 }
 
 // WriteData writes MuxerData to TS stream
@@ -326,6 +404,12 @@ func (m *Muxer) WriteTables() (int, error) {
 		return bytesWritten, err
 	}
 
+	if m.sdtEnabled {
+		if err := m.generateSDT(); err != nil {
+			return bytesWritten, err
+		}
+	}
+
 	n, err := m.w.Write(m.patBytes.Bytes())
 	if err != nil {
 		return bytesWritten, err
@@ -337,6 +421,14 @@ func (m *Muxer) WriteTables() (int, error) {
 		return bytesWritten, err
 	}
 	bytesWritten += n
+
+	if m.sdtEnabled {
+		n, err = m.w.Write(m.sdtBytes.Bytes())
+		if err != nil {
+			return bytesWritten, err
+		}
+		bytesWritten += n
+	}
 
 	return bytesWritten, nil
 }
@@ -465,6 +557,67 @@ func (m *Muxer) generatePMT() error {
 	}
 
 	m.pmtUpdated = false
+
+	return nil
+}
+
+func (m *Muxer) generateSDT() error {
+	// Refresh identifiers in case the options were changed after SetSDT
+	m.sdt.TransportStreamID = m.transportStreamID
+	m.sdt.OriginalNetworkID = m.originalNetworkID
+
+	versionNumber := m.sdtVersion.get()
+	if m.sdtUpdated {
+		versionNumber = m.sdtVersion.inc()
+	}
+
+	syntax := &PSISectionSyntax{
+		Data: &PSISectionSyntaxData{SDT: &m.sdt},
+		Header: &PSISectionSyntaxHeader{
+			CurrentNextIndicator: true,
+			// TODO support for SDT tables longer than 1 TS packet
+			//LastSectionNumber:    0,
+			//SectionNumber:        0,
+			TableIDExtension: m.sdt.TransportStreamID,
+			VersionNumber:    uint8(versionNumber),
+		},
+	}
+	section := PSISection{
+		Header: &PSISectionHeader{
+			SectionLength:          calcSDTSectionLength(&m.sdt),
+			SectionSyntaxIndicator: true,
+			TableID:                PSITableIDSDTVariant1,
+		},
+		Syntax: syntax,
+	}
+	psiData := PSIData{
+		Sections: []*PSISection{&section},
+	}
+
+	m.buf.Reset()
+	w := astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: &m.buf})
+	if _, err := writePSIData(w, &psiData); err != nil {
+		return err
+	}
+
+	m.sdtBytes.Reset()
+	wPacket := astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: &m.sdtBytes})
+
+	pkt := Packet{
+		Header: PacketHeader{
+			HasPayload:                true,
+			PayloadUnitStartIndicator: true,
+			PID:                       PIDSDT,
+			ContinuityCounter:         uint8(m.sdtCC.inc()),
+		},
+		Payload: m.buf.Bytes(),
+	}
+	if _, err := writePacket(wPacket, &pkt, m.packetSize); err != nil {
+		// FIXME save old SDT and rollback to it here maybe?
+		return err
+	}
+
+	m.sdtUpdated = false
 
 	return nil
 }
