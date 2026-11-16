@@ -83,6 +83,45 @@ for {
 }
 ```
 
+## Diagnose continuity and timestamps
+
+`ContinuityDiagnoser` is a streaming analyzer that consumes the demuxer packet stream and
+reports, per PID, continuity counter gaps/duplicates and PCR/PES PTS/DTS anomalies with the
+exact packet index and byte offset.
+
+It honors the adaptation field `discontinuity_indicator` (the PID is re-based instead of
+reporting a gap or timestamp jump), handles 33-bit timestamp and 4-bit counter wraparound,
+supports 188- and 192-byte packets, and keeps one bounded state entry per active PID. A
+repeated continuity counter with an identical payload is reported as a legal retransmission,
+never as a gap.
+
+```go
+// Packet size must be provided so byte offsets are correct for 192-byte streams.
+// MaxTrackedPIDs bounds the retained state; tolerances default to zero (any backwards step is reported).
+d, _ := astits.NewContinuityDiagnoser(
+    astits.ContinuityDiagnoserOptPacketSize(188),
+    astits.ContinuityDiagnoserOptMaxTrackedPIDs(64),
+    astits.ContinuityDiagnoserOptPCRBackwardTolerance(300), // 27 MHz ticks
+)
+
+dmx := astits.NewDemuxer(ctx, f)
+events, err := d.HandleDemuxer(dmx)
+if err != nil {
+    log.Fatal(err)
+}
+for _, e := range events {
+    // e.Type, e.PID, e.PacketIndex, e.ByteOffset, e.MissingCount, e.Delta ...
+    fmt.Println(e)
+}
+
+// When a PID is remapped to another elementary stream out-of-band, drop its state so the
+// next packet is treated as a fresh baseline rather than a discontinuity.
+d.ResetPID(pid)
+```
+
+You can also feed packets one at a time with `HandlePacket` if you already run your own
+`NextPacket()` loop.
+
 ## Mux
 
 ```go
