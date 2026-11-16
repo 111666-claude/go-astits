@@ -175,7 +175,7 @@ This library provides 2 CLIs that will automatically get installed in `GOPATH/bi
 - [x] Demux PMT packets
 - [x] Mux PMT packets
 - [x] Demux EIT packets
-- [ ] Mux EIT packets
+- [x] Mux EIT packets
 - [x] Demux NIT packets
 - [ ] Mux NIT packets
 - [x] Demux SDT packets

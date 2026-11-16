@@ -29,6 +29,11 @@ type EITDataEvent struct {
 	StartTime      time.Time
 }
 
+const (
+	eitSectionHeaderBytesSize = 6  // transport_stream_id (16) + original_network_id (16) + segment_last_section_number (8) + last_table_id (8)
+	eitEventHeaderBytesSize   = 12 // event_id (16) + start_time (40) + duration (24) + running_status/free_CA_mode/descriptors_loop_length (16)
+)
+
 // parseEITSection parses an EIT section
 func parseEITSection(i *astikit.BytesIterator, offsetSectionsEnd int, tableIDExtension uint16) (d *EITData, err error) {
 	// Create data
@@ -121,4 +126,58 @@ func parseEITSection(i *astikit.BytesIterator, offsetSectionsEnd int, tableIDExt
 		d.Events = append(d.Events, e)
 	}
 	return
+}
+
+// calcEITSectionLength returns the length of the EIT section data, i.e. everything that
+// follows the PSI syntax header and precedes the CRC32.
+func calcEITSectionLength(d *EITData) uint16 {
+	ret := uint16(eitSectionHeaderBytesSize)
+	for _, e := range d.Events {
+		ret += eitEventHeaderBytesSize
+		ret += calcDescriptorsLength(e.Descriptors)
+	}
+	return ret
+}
+
+// writeEITSection writes an EIT section data (everything that follows the PSI syntax header
+// and precedes the CRC32).
+func writeEITSection(w *astikit.BitsWriter, d *EITData) (int, error) {
+	b := astikit.NewBitsWriterBatch(w)
+
+	// Section data header
+	b.Write(d.TransportStreamID)
+	b.Write(d.OriginalNetworkID)
+	b.Write(d.SegmentLastSectionNumber)
+	b.Write(d.LastTableID)
+	bytesWritten := eitSectionHeaderBytesSize
+
+	// Events
+	for _, e := range d.Events {
+		b.Write(e.EventID)
+		bytesWritten += 2
+
+		n, err := writeDVBTime(w, e.StartTime)
+		if err != nil {
+			return 0, fmt.Errorf("astits: writing DVB time failed: %w", err)
+		}
+		bytesWritten += n
+
+		n, err = writeDVBDurationSeconds(w, e.Duration)
+		if err != nil {
+			return 0, fmt.Errorf("astits: writing DVB duration failed: %w", err)
+		}
+		bytesWritten += n
+
+		b.WriteN(e.RunningStatus, 3)
+		b.Write(e.HasFreeCSAMode)
+		b.WriteN(calcDescriptorsLength(e.Descriptors), 12)
+		bytesWritten += 2
+
+		if n, err = writeDescriptors(w, e.Descriptors); err != nil {
+			return 0, err
+		}
+		bytesWritten += n
+	}
+
+	return bytesWritten, b.Err()
 }

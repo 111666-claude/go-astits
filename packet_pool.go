@@ -55,7 +55,7 @@ func (b *packetAccumulator) add(p *Packet) (ps []*Packet) {
 
 	// Check if PSI payload is complete
 	if b.programMap != nil &&
-		(b.pid == PIDPAT || b.programMap.existsUnlocked(b.pid)) &&
+		(b.pid == PIDPAT || b.pid == PIDEIT || b.programMap.existsUnlocked(b.pid)) &&
 		isPSIComplete(mps) {
 		ps = mps
 		mps = nil

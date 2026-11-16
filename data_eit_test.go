@@ -6,6 +6,7 @@ import (
 
 	"github.com/asticode/go-astikit"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var eit = &EITData{
@@ -45,4 +46,66 @@ func TestParseEITSection(t *testing.T) {
 	d, err := parseEITSection(astikit.NewBytesIterator(b), len(b), uint16(1))
 	assert.Equal(t, d, eit)
 	assert.NoError(t, err)
+}
+
+func TestWriteEITSection(t *testing.T) {
+	d := &EITData{
+		TransportStreamID:        7,
+		OriginalNetworkID:        9,
+		SegmentLastSectionNumber: 0,
+		LastTableID:              uint8(PSITableIDEITPresentFollowing),
+		Events: []*EITDataEvent{
+			{
+				EventID:       100,
+				StartTime:     dvbTime,
+				Duration:      dvbDurationSeconds,
+				RunningStatus: RunningStatusRunning,
+				Descriptors: []*Descriptor{{
+					Tag: DescriptorTagShortEvent,
+					ShortEvent: &DescriptorShortEvent{
+						Language:  []byte("eng"),
+						EventName: []byte("Event"),
+					},
+					Length: 10, // language (3) + name length (1) + name (5) + text length (1)
+				}},
+			},
+		},
+	}
+
+	buf := &bytes.Buffer{}
+	w := astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: buf})
+	n, err := writeEITSection(w, d)
+	assert.NoError(t, err)
+	assert.Equal(t, int(calcEITSectionLength(d)), n)
+	assert.Equal(t, n, buf.Len())
+
+	// Round-trip the section data with the parser.
+	got, err := parseEITSection(astikit.NewBytesIterator(buf.Bytes()), buf.Len(), d.TransportStreamID)
+	assert.NoError(t, err)
+	require.Len(t, got.Events, 1)
+	assert.Equal(t, uint16(100), got.Events[0].EventID)
+	assert.Equal(t, dvbTime, got.Events[0].StartTime)
+	assert.Equal(t, dvbDurationSeconds, got.Events[0].Duration)
+	assert.Equal(t, uint8(RunningStatusRunning), got.Events[0].RunningStatus)
+	require.Len(t, got.Events[0].Descriptors, 1)
+	assert.Equal(t, []byte("eng"), got.Events[0].Descriptors[0].ShortEvent.Language)
+	assert.Equal(t, []byte("Event"), got.Events[0].Descriptors[0].ShortEvent.EventName)
+}
+
+func TestCalcEITSectionLength(t *testing.T) {
+	d := &EITData{Events: []*EITDataEvent{
+		{Descriptors: []*Descriptor{
+			{Tag: DescriptorTagShortEvent, ShortEvent: &DescriptorShortEvent{Language: []byte("eng"), EventName: []byte("A")}},
+			{Tag: DescriptorTagShortEvent, ShortEvent: &DescriptorShortEvent{Language: []byte("eng"), EventName: []byte("B")}},
+		}},
+		{Descriptors: []*Descriptor{
+			{Tag: DescriptorTagShortEvent, ShortEvent: &DescriptorShortEvent{Language: []byte("eng"), EventName: []byte("C")}},
+		}},
+	}}
+
+	// section header + 2 events + 3 short event descriptors (tag+length+payload)
+	expected := uint16(eitSectionHeaderBytesSize) +
+		2*eitEventHeaderBytesSize +
+		(2 + 5 + 1) + (2 + 5 + 1) + (2 + 5 + 1)
+	assert.Equal(t, expected, calcEITSectionLength(d))
 }

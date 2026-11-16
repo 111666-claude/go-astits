@@ -39,12 +39,13 @@ const (
 	PSITableIDTOT  PSITableID = 0x73
 	PSITableIDNull PSITableID = 0xff
 
-	PSITableIDEITStart    PSITableID = 0x4e
-	PSITableIDEITEnd      PSITableID = 0x6f
-	PSITableIDSDTVariant1 PSITableID = 0x42
-	PSITableIDSDTVariant2 PSITableID = 0x46
-	PSITableIDNITVariant1 PSITableID = 0x40
-	PSITableIDNITVariant2 PSITableID = 0x41
+	PSITableIDEITStart            PSITableID = 0x4e
+	PSITableIDEITEnd              PSITableID = 0x6f
+	PSITableIDEITPresentFollowing PSITableID = 0x4e // present/following table for the actual transport stream
+	PSITableIDSDTVariant1         PSITableID = 0x42
+	PSITableIDSDTVariant2         PSITableID = 0x46
+	PSITableIDNITVariant1         PSITableID = 0x40
+	PSITableIDNITVariant2         PSITableID = 0x41
 )
 
 var ErrCRC32Mismatch = errors.New("astits: CRC32 mismatch")
@@ -525,6 +526,10 @@ func calcPSISectionLength(s *PSISection) uint16 {
 		ret += calcPMTSectionLength(s.Syntax.Data.PMT)
 	}
 
+	if s.Header.TableID >= PSITableIDEITStart && s.Header.TableID <= PSITableIDEITEnd && s.Syntax.Data.EIT != nil {
+		ret += calcEITSectionLength(s.Syntax.Data.EIT)
+	}
+
 	if s.Header.TableID.hasCRC32() {
 		ret += 4
 	}
@@ -533,7 +538,9 @@ func calcPSISectionLength(s *PSISection) uint16 {
 }
 
 func writePSISection(w *astikit.BitsWriter, s *PSISection) (int, error) {
-	if s.Header.TableID != PSITableIDPAT && s.Header.TableID != PSITableIDPMT {
+	if s.Header.TableID != PSITableIDPAT &&
+		s.Header.TableID != PSITableIDPMT &&
+		!(s.Header.TableID >= PSITableIDEITStart && s.Header.TableID <= PSITableIDEITEnd) {
 		return 0, fmt.Errorf("writePSISection: table %s is not implemented", s.Header.TableID.Type())
 	}
 
@@ -611,6 +618,13 @@ func writePSISectionSyntaxData(w *astikit.BitsWriter, d *PSISectionSyntaxData, t
 		return writePATSection(w, d.PAT)
 	case PSITableIDPMT:
 		return writePMTSection(w, d.PMT)
+	}
+
+	if tableID >= PSITableIDEITStart && tableID <= PSITableIDEITEnd {
+		if d.EIT == nil {
+			return 0, errors.New("writePSISectionSyntaxData: EIT data is required")
+		}
+		return writeEITSection(w, d.EIT)
 	}
 
 	return 0, nil
