@@ -53,10 +53,11 @@ func TestRoundTrip(t *testing.T) {
 
 	// Phase 2: Mux everything back into a new TS stream, preserving PAT/PMT identifiers
 	var buf bytes.Buffer
-	muxer := NewMuxer(context.Background(), &buf,
+	muxer, err := NewMuxer(context.Background(), &buf,
 		WithTransportStreamID(originalPAT.TransportStreamID),
 		WithPMTPID(originalPMTPID),
 	)
+	require.NoError(t, err)
 
 	for _, es := range originalPMT.ElementaryStreams {
 		err := muxer.AddElementaryStream(PMTElementaryStream{

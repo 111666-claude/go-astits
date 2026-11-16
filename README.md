@@ -103,7 +103,10 @@ f, _ := os.Create("/path/to/file.ts")
 defer f.Close()
 
 // Create the muxer
-mx := astits.NewMuxer(ctx, f)
+mx, err := astits.NewMuxer(ctx, f)
+if err != nil {
+    // handle invalid options
+}
 
 // Add an elementary stream
 mx.AddElementaryStream(astits.PMTElementaryStream{
@@ -123,6 +126,38 @@ mx.WriteData(&astits.MuxerData{
     PID: 1,
 })
 ```
+
+### M2TS (Blu-ray, 192-byte packets)
+
+For Blu-ray material the muxer can emit 192-byte M2TS records instead of plain
+188-byte MPEG-TS packets. Each 188-byte packet is prepended with a 4-byte BDAV
+header holding a 2-bit copy permission indicator and a 30-bit arrival time
+stamp (ATS) on the 90 kHz time base. Continuity counters and the PAT/PMT/PES
+payloads are still computed over the 188-byte packets.
+
+```go
+// Inject a clock so the ATS values are deterministic. It must return a
+// monotonic, 90 kHz counter; passing nil selects a wall-clock driven clock.
+type myClock struct{}
+func (myClock) NowM2TSTicks() uint64 { return /* 90 kHz ticks */ }
+
+mx, err := astits.NewMuxer(ctx, f,
+    astits.WithM2TS(myClock{}, astits.M2TSCopyPermissionCopyFree),
+)
+
+// ... AddElementaryStream / WriteData as usual ...
+
+// Surface a trailing partial packet (if any) instead of dropping it.
+if err := mx.Flush(); err != nil {
+    // handle ErrM2TSPacketBoundary
+}
+```
+
+A backward clock jump, an out-of-range copy permission indicator, a short
+write from the underlying writer, or a packet missing its `0x47` sync byte all
+return explicit `ErrM2TS*` errors rather than emitting data that could be
+mistaken for a valid stream. The demuxer auto-detects the 192-byte layout and
+exposes the embedded 188-byte packets as usual.
 
 ## Options
 

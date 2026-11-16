@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 
 	"github.com/asticode/go-astikit"
@@ -28,6 +29,14 @@ type Muxer struct {
 
 	packetSize             int
 	tablesRetransmitPeriod int // period in PES packets
+
+	// m2tsEnabled makes the muxer emit 192-byte BDAV records instead of plain
+	// 188-byte MPEG-TS packets. When enabled, m2ts wraps m.w and every packet
+	// is prepended with a 4-byte copy-permission/ATS header.
+	m2tsEnabled        bool
+	m2ts               *m2tsWriter
+	m2tsClock          M2TSClock
+	m2tsCopyPermission uint8
 
 	transportStreamID uint16
 	pmtPID            uint16
@@ -87,14 +96,38 @@ func WithPMTPID(pid uint16) func(*Muxer) {
 	}
 }
 
+// WithM2TS enables 192-byte M2TS (BDAV) output. Every 188-byte MPEG-TS packet
+// is prepended with a 4-byte header carrying a 2-bit copy permission indicator
+// and a 30-bit arrival time stamp on the 90 kHz time base.
+//
+// clock is injected so that the arrival time stamps are deterministic in
+// tests; pass nil to use a wall-clock driven 90 kHz clock. The clock must be
+// monotonic, a backward jump makes the next Write fail with
+// ErrM2TSClockBackwards. copyPermission must be one of the
+// M2TSCopyPermission* constants (0..3), any other value is rejected with
+// ErrM2TSCopyPermissionInvalid.
+//
+// The continuity counters and the PAT/PMT/PES payloads are still computed over
+// the plain 188-byte packets; only the on-disk framing changes.
+func WithM2TS(clock M2TSClock, copyPermission uint8) func(*Muxer) {
+	return func(m *Muxer) {
+		m.m2tsEnabled = true
+		m.m2tsCopyPermission = copyPermission
+		m.m2tsClock = clock
+	}
+}
+
 // TODO MuxerOptAutodetectPCRPID selecting first video PID for each PMT, falling back to first audio, falling back to any other
 
-func NewMuxer(ctx context.Context, w io.Writer, opts ...func(*Muxer)) *Muxer {
+// NewMuxer creates a muxer writing to w. It returns an error only for invalid
+// options, currently an out-of-range M2TS copy permission indicator
+// (ErrM2TSCopyPermissionInvalid).
+func NewMuxer(ctx context.Context, w io.Writer, opts ...func(*Muxer)) (*Muxer, error) {
 	m := &Muxer{
 		ctx: ctx,
 		w:   w,
 
-		packetSize:             MpegTsPacketSize, // no 192-byte packet support yet
+		packetSize:             MpegTsPacketSize, // continuity counters and payloads always use the 188-byte TS layout
 		tablesRetransmitPeriod: 40,
 
 		pmtPID: pmtStartPID,
@@ -115,12 +148,25 @@ func NewMuxer(ctx context.Context, w io.Writer, opts ...func(*Muxer)) *Muxer {
 		esContexts: map[uint32]*esContext{},
 	}
 
-	m.bufWriter = astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: &m.buf})
-	m.bitsWriter = astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: m.w})
-
 	for _, opt := range opts {
 		opt(m)
 	}
+
+	if m.m2tsEnabled {
+		if m.m2tsCopyPermission > 3 {
+			return nil, fmt.Errorf("%w: got %d", ErrM2TSCopyPermissionInvalid, m.m2tsCopyPermission)
+		}
+		if m.m2tsClock == nil {
+			m.m2tsClock = newSystemM2TSClock()
+		}
+		m.m2ts = newM2TSWriter(m.w, m.m2tsClock, m.m2tsCopyPermission)
+		// All packet bytes go through the BDAV wrapper, which prepends the
+		// 4-byte header and guarantees 192-byte output records.
+		m.bitsWriter = astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: m.m2ts})
+	} else {
+		m.bitsWriter = astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: m.w})
+	}
+	m.bufWriter = astikit.NewBitsWriter(astikit.BitsWriterOptions{Writer: &m.buf})
 
 	// TODO multiple programs support
 	m.pm.setUnlocked(m.pmtPID, programNumberStart)
@@ -129,7 +175,7 @@ func NewMuxer(ctx context.Context, w io.Writer, opts ...func(*Muxer)) *Muxer {
 	// to output tables at the very start
 	m.tablesRetransmitCounter = m.tablesRetransmitPeriod
 
-	return m
+	return m, nil
 }
 
 // if es.ElementaryPID is zero, it will be generated automatically
@@ -300,6 +346,17 @@ func (m *Muxer) WritePacket(p *Packet) (int, error) {
 	return writePacket(m.bitsWriter, p, m.packetSize)
 }
 
+// Flush reports any bytes buffered by the M2TS layer that did not complete a
+// final 188-byte packet. In plain TS mode it is a no-op. Call it once after
+// the last WriteData/WritePacket/WriteTables to turn a truncated final packet
+// into ErrM2TSPacketBoundary instead of silently dropping data.
+func (m *Muxer) Flush() error {
+	if !m.m2tsEnabled {
+		return nil
+	}
+	return m.m2ts.flush()
+}
+
 func (m *Muxer) retransmitTables(force bool) (int, error) {
 	m.tablesRetransmitCounter++
 	if !force && m.tablesRetransmitCounter < m.tablesRetransmitPeriod {
@@ -315,6 +372,16 @@ func (m *Muxer) retransmitTables(force bool) (int, error) {
 	return n, nil
 }
 
+// packetWriter returns the writer that full 188-byte packets must be handed
+// to. In M2TS mode it is the BDAV wrapper that adds the 4-byte header,
+// otherwise it is the user-provided writer directly.
+func (m *Muxer) packetWriter() io.Writer {
+	if m.m2tsEnabled {
+		return m.m2ts
+	}
+	return m.w
+}
+
 func (m *Muxer) WriteTables() (int, error) {
 	bytesWritten := 0
 
@@ -326,17 +393,19 @@ func (m *Muxer) WriteTables() (int, error) {
 		return bytesWritten, err
 	}
 
-	n, err := m.w.Write(m.patBytes.Bytes())
-	if err != nil {
-		return bytesWritten, err
+	for _, table := range [][]byte{m.patBytes.Bytes(), m.pmtBytes.Bytes()} {
+		n, err := m.packetWriter().Write(table)
+		if err != nil {
+			return bytesWritten, err
+		}
+		// A plain io.Writer may accept fewer bytes without error; treat that
+		// as a failure so a truncated table can never be mistaken for a valid
+		// packet stream.
+		if n != len(table) {
+			return bytesWritten, fmt.Errorf("astits: writing table wrote %d of %d bytes", n, len(table))
+		}
+		bytesWritten += n
 	}
-	bytesWritten += n
-
-	n, err = m.w.Write(m.pmtBytes.Bytes())
-	if err != nil {
-		return bytesWritten, err
-	}
-	bytesWritten += n
 
 	return bytesWritten, nil
 }

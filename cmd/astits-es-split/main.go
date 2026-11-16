@@ -163,7 +163,10 @@ func main() {
 						}
 					}()
 
-					mux := astits.NewMuxer(context.Background(), outWriter)
+					mux, muxErr := astits.NewMuxer(context.Background(), outWriter)
+					if muxErr != nil {
+						log.Fatalf("%v", muxErr)
+					}
 					if err = mux.AddElementaryStream(*es); err != nil {
 						log.Fatalf("%v", err)
 					}

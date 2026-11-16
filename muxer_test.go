@@ -7,6 +7,7 @@ import (
 
 	"github.com/asticode/go-astikit"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func patExpectedBytes(versionNumber uint8, cc uint8) []byte {
@@ -46,9 +47,10 @@ func patExpectedBytes(versionNumber uint8, cc uint8) []byte {
 }
 
 func TestMuxer_generatePAT(t *testing.T) {
-	muxer := NewMuxer(context.Background(), nil)
+	muxer, err := NewMuxer(context.Background(), nil)
+	require.NoError(t, err)
 
-	err := muxer.generatePAT()
+	err = muxer.generatePAT()
 	assert.NoError(t, err)
 	assert.Equal(t, MpegTsPacketSize, muxer.patBytes.Len())
 	assert.Equal(t, patExpectedBytes(0, 0), muxer.patBytes.Bytes())
@@ -158,8 +160,9 @@ func pmtExpectedBytesVideoAndAudio(versionNumber uint8, cc uint8) []byte {
 }
 
 func TestMuxer_generatePMT(t *testing.T) {
-	muxer := NewMuxer(context.Background(), nil)
-	err := muxer.AddElementaryStream(PMTElementaryStream{
+	muxer, err := NewMuxer(context.Background(), nil)
+	require.NoError(t, err)
+	err = muxer.AddElementaryStream(PMTElementaryStream{
 		ElementaryPID: 0x1234,
 		StreamType:    StreamTypeH264Video,
 	})
@@ -192,8 +195,9 @@ func TestMuxer_generatePMT(t *testing.T) {
 
 func TestMuxer_WriteTables(t *testing.T) {
 	buf := bytes.Buffer{}
-	muxer := NewMuxer(context.Background(), &buf)
-	err := muxer.AddElementaryStream(PMTElementaryStream{
+	muxer, err := NewMuxer(context.Background(), &buf)
+	require.NoError(t, err)
+	err = muxer.AddElementaryStream(PMTElementaryStream{
 		ElementaryPID: 0x1234,
 		StreamType:    StreamTypeH264Video,
 	})
@@ -210,8 +214,9 @@ func TestMuxer_WriteTables(t *testing.T) {
 }
 
 func TestMuxer_WriteTables_Error(t *testing.T) {
-	muxer := NewMuxer(context.Background(), nil)
-	err := muxer.AddElementaryStream(PMTElementaryStream{
+	muxer, err := NewMuxer(context.Background(), nil)
+	require.NoError(t, err)
+	err = muxer.AddElementaryStream(PMTElementaryStream{
 		ElementaryPID: 0x1234,
 		StreamType:    StreamTypeH264Video,
 	})
@@ -222,8 +227,9 @@ func TestMuxer_WriteTables_Error(t *testing.T) {
 }
 
 func TestMuxer_AddElementaryStream(t *testing.T) {
-	muxer := NewMuxer(context.Background(), nil)
-	err := muxer.AddElementaryStream(PMTElementaryStream{
+	muxer, err := NewMuxer(context.Background(), nil)
+	require.NoError(t, err)
+	err = muxer.AddElementaryStream(PMTElementaryStream{
 		ElementaryPID: 0x1234,
 		StreamType:    StreamTypeH264Video,
 	})
@@ -237,8 +243,9 @@ func TestMuxer_AddElementaryStream(t *testing.T) {
 }
 
 func TestMuxer_RemoveElementaryStream(t *testing.T) {
-	muxer := NewMuxer(context.Background(), nil)
-	err := muxer.AddElementaryStream(PMTElementaryStream{
+	muxer, err := NewMuxer(context.Background(), nil)
+	require.NoError(t, err)
+	err = muxer.AddElementaryStream(PMTElementaryStream{
 		ElementaryPID: 0x1234,
 		StreamType:    StreamTypeH264Video,
 	})
@@ -261,9 +268,10 @@ func testPayload() []byte {
 
 func TestMuxer_WritePayload(t *testing.T) {
 	buf := bytes.Buffer{}
-	muxer := NewMuxer(context.Background(), &buf)
+	muxer, err := NewMuxer(context.Background(), &buf)
+	require.NoError(t, err)
 
-	err := muxer.AddElementaryStream(PMTElementaryStream{
+	err = muxer.AddElementaryStream(PMTElementaryStream{
 		ElementaryPID: 0x1234,
 		StreamType:    StreamTypeH264Video,
 	})

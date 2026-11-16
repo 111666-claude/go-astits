@@ -85,7 +85,25 @@ func parsePacket(i *astikit.BytesIterator, s PacketSkipper) (p *Packet, err erro
 		return
 	}
 
-	// Packet must start with a sync byte
+	// Packet must start with a sync byte.
+	// A plain 188-byte MPEG-TS packet starts with it. A 192-byte M2TS record
+	// starts with a 4-byte BDAV header, so its sync byte is at offset 4. The
+	// legacy 192-byte layout exercised by the tests puts 4 extra bytes right
+	// after the sync byte, which is handled below by seeking to the last 188.
+	if b != syncByte && i.Len() == M2TSPacketSize {
+		// M2TS: the first byte was part of the 4-byte BDAV header. Read the
+		// remaining 3 header bytes, then the sync byte at offset 4.
+		for k := 1; k < m2tsHeaderSize; k++ {
+			if b, err = i.NextByte(); err != nil {
+				err = fmt.Errorf("astits: reading m2ts header failed: %w", err)
+				return
+			}
+		}
+		if b, err = i.NextByte(); err != nil {
+			err = fmt.Errorf("astits: getting m2ts sync byte failed: %w", err)
+			return
+		}
+	}
 	if b != syncByte {
 		err = ErrPacketMustStartWithASyncByte
 		return
