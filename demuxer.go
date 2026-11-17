@@ -22,6 +22,11 @@ var (
 // https://en.wikipedia.org/wiki/MPEG_transport_stream
 // http://seidl.cs.vsb.cz/download/dvb/DVB_Poster.pdf
 // http://www.etsi.org/deliver/etsi_en/300400_300499/300468/01.13.01_40/en_300468v011301o.pdf
+// DiscontinuityHandler is called whenever a continuity counter break is
+// detected on a PID (excluding the null PID). The buffered packets of the
+// affected PID are dropped at the same time.
+type DiscontinuityHandler func(pid uint16)
+
 type Demuxer struct {
 	ctx        context.Context
 	dataBuffer []*DemuxerData
@@ -30,6 +35,7 @@ type Demuxer struct {
 	optPacketSize    int
 	optPacketsParser PacketsParser
 	optPacketSkipper PacketSkipper
+	optDiscontinuity DiscontinuityHandler
 
 	packetBuffer *packetBuffer
 	packetPool   *packetPool
@@ -56,12 +62,13 @@ func NewDemuxer(ctx context.Context, r io.Reader, opts ...func(*Demuxer)) (d *De
 		r:          r,
 		streamMap:  newElementaryStreamMap(),
 	}
-	d.packetPool = newPacketPool(d.programMap)
 
 	// Apply options
 	for _, opt := range opts {
 		opt(d)
 	}
+
+	d.packetPool = newPacketPool(d.programMap, d.optDiscontinuity)
 
 	return
 }
@@ -91,6 +98,14 @@ func DemuxerOptPacketsParser(p PacketsParser) func(*Demuxer) {
 func DemuxerOptPacketSkipper(s PacketSkipper) func(*Demuxer) {
 	return func(d *Demuxer) {
 		d.optPacketSkipper = s
+	}
+}
+
+// DemuxerOptDiscontinuityHandler returns the option to set a handler called
+// whenever a transport stream continuity counter break is detected
+func DemuxerOptDiscontinuityHandler(h DiscontinuityHandler) func(*Demuxer) {
+	return func(d *Demuxer) {
+		d.optDiscontinuity = h
 	}
 }
 
@@ -215,7 +230,7 @@ func (dmx *Demuxer) updateData(ds []*DemuxerData) (d *DemuxerData) {
 func (dmx *Demuxer) Rewind() (n int64, err error) {
 	dmx.dataBuffer = []*DemuxerData{}
 	dmx.packetBuffer = nil
-	dmx.packetPool = newPacketPool(dmx.programMap)
+	dmx.packetPool = newPacketPool(dmx.programMap, dmx.optDiscontinuity)
 	if n, err = rewind(dmx.r); err != nil {
 		err = fmt.Errorf("astits: rewinding reader failed: %w", err)
 		return

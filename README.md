@@ -164,12 +164,52 @@ This library provides 2 CLIs that will automatically get installed in `GOPATH/bi
 
     $ astits-es-split <path to your file> -o <path to output dir>
 
+## astits-subtitle-dump
+
+### Extract DVB bitmap subtitle segments
+
+DVB bitmap subtitles (EN 300 743) are carried in private-data PES streams.
+The library exposes a `DVBSubtitleExtractor` that selects subtitling streams
+from the PMT subtitling descriptors (tag 0x59) by language and composition
+page ID, and emits the raw segments with their PTS, segment type and original
+segment payload. Bitmaps are neither decoded nor rendered.
+
+```go
+f, _ := os.Open("/path/to/file.ts")
+defer f.Close()
+
+dmx := astits.NewDemuxer(ctx, f)
+extractor := astits.NewDVBSubtitleExtractor(dmx,
+    astits.DVBSubtitleOptLanguage([]byte("eng")),
+    astits.DVBSubtitleOptCompositionPage(0x0200),
+)
+for {
+    segment, err := extractor.NextSegment()
+    if errors.Is(err, astits.ErrNoMorePackets) {
+        break
+    }
+    // segment.PTS, segment.PID, segment.Type, segment.Data ...
+}
+```
+
+`NextEvent` additionally reports PID reassignment
+(`DVBSubtitleEventTypePIDChange`) and transport continuity breaks
+(`DVBSubtitleEventTypeDiscontinuity`). The CLI prints the same information:
+
+    $ astits-subtitle-dump -i <path to your file> [-lang <code>] [-page <id>]
+
+Malformed input is reported through dedicated sentinel errors:
+`ErrDVBSubtitleSyncByte` (bad data identifier or segment sync byte),
+`ErrDVBSubtitleSegmentLength` (segment length past the PES boundary) and
+`ErrDVBSubtitlePTSMissing` (subtitling PES without a PTS).
+
 # Features and roadmap
 
 - [x] Add demuxer
 - [x] Add muxer
 - [x] Demux PES packets
 - [x] Mux PES packets
+- [x] Extract DVB bitmap subtitle segments (EN 300 743)
 - [x] Demux PAT packets
 - [x] Mux PAT packets
 - [x] Demux PMT packets
