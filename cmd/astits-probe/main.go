@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -28,12 +29,16 @@ var (
 	format          = flag.String("f", "", "the format")
 	inputPath       = flag.String("i", "", "the input path")
 	memoryProfiling = flag.Bool("mp", false, "if yes, memory profiling is enabled")
+	ttLanguage      = flag.String("teletext-language", "", "teletext extraction: ISO 639-2/B language code from the PMT teletext descriptor (e.g. eng); empty matches the first track")
+	ttMagazine      = flag.Int("teletext-magazine", 0, "teletext extraction: magazine number from the descriptor (1-8); 0 matches any")
+	ttPage          = flag.Int("teletext-page", 0, "teletext extraction: page number from the descriptor (0-99); 0 matches any")
+	ttProgram       = flag.Int("teletext-program", 0, "teletext extraction: program number; 0 uses the first program with a teletext descriptor")
 )
 
 func main() {
 	// Init
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "Usage of %s <data|packets|default>:\n", os.Args[0])
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage of %s <data|packets|teletext|default>:\n", os.Args[0])
 		flag.PrintDefaults()
 	}
 	flag.Var(dataTypes, "d", "the datatypes whitelist (all, pat, pmt, pes, eit, nit, sdt, tot)")
@@ -62,8 +67,21 @@ func main() {
 		defer c.Close()
 	}
 
-	// Create the demuxer
-	var dmx = astits.NewDemuxer(ctx, r, astits.DemuxerOptLogger(log.Default()))
+	// Create the demuxer. The teletext command needs the extractor's packet
+	// skipper to detect continuity errors on the selected PID.
+	var teletextExtractor *astits.TeletextExtractor
+	var dmxOpts []func(*astits.Demuxer)
+	dmxOpts = append(dmxOpts, astits.DemuxerOptLogger(log.Default()))
+	if cmd == "teletext" {
+		teletextExtractor = astits.NewTeletextExtractor(astits.TeletextSelector{
+			ProgramNumber: uint16(*ttProgram),
+			Language:      []byte(*ttLanguage),
+			Magazine:      uint8(*ttMagazine),
+			Page:          uint8(*ttPage),
+		})
+		dmxOpts = append(dmxOpts, astits.DemuxerOptPacketSkipper(teletextExtractor.PacketSkipper()))
+	}
+	var dmx = astits.NewDemuxer(ctx, r, dmxOpts...)
 
 	// Switch on command
 	switch cmd {
@@ -79,6 +97,13 @@ func main() {
 		if err = packets(dmx); err != nil {
 			if !errors.Is(err, astits.ErrNoMorePackets) {
 				log.Fatal(fmt.Errorf("astits: fetching packets failed: %w", err))
+			}
+		}
+	case "teletext":
+		// Extract teletext data units
+		if err = teletext(dmx, teletextExtractor); err != nil {
+			if !errors.Is(err, astits.ErrNoMorePackets) {
+				log.Fatal(fmt.Errorf("astits: extracting teletext failed: %w", err))
 			}
 		}
 	default:
@@ -494,4 +519,76 @@ func descriptorToString(d *astits.Descriptor) string {
 		return "[Teletext] " + strings.Join(os, " - ")
 	}
 	return fmt.Sprintf("unlisted descriptor tag 0x%x", d.Tag)
+}
+
+// teletextOutput is the JSON representation of one extracted data unit or error.
+type teletextOutput struct {
+	Kind          string `json:"kind"`
+	PID           uint16 `json:"pid,omitempty"`
+	ProgramNumber uint16 `json:"program_number,omitempty"`
+	Language      string `json:"language,omitempty"`
+	DataUnitID    uint8  `json:"data_unit_id,omitempty"`
+	Magazine      uint8  `json:"magazine,omitempty"`
+	Row           uint8  `json:"row,omitempty"`
+	Page          uint8  `json:"page,omitempty"`
+	PTS           int64  `json:"pts,omitempty"`
+	PTSPresent    bool   `json:"pts_present,omitempty"`
+	Corrected     bool   `json:"hamming_corrected,omitempty"`
+	DataHex       string `json:"data_hex,omitempty"`
+	Error         string `json:"error,omitempty"`
+}
+
+// teletext drives the teletext extractor and emits one JSON object per line:
+// data units carry their PTS and the raw 46-byte EBU data unit as hexadecimal,
+// error conditions (missing descriptor, bad data unit length, missing PTS,
+// continuity break, program change) are emitted as error objects.
+func teletext(dmx *astits.Demuxer, ext *astits.TeletextExtractor) error {
+	enc := json.NewEncoder(os.Stdout)
+
+	emit := func(events []*astits.TeletextEvent) error {
+		for _, ev := range events {
+			switch ev.Kind {
+			case astits.TeletextEventKindError:
+				if err := enc.Encode(teletextOutput{Kind: "error", PID: ev.PID, Error: ev.Err.Error()}); err != nil {
+					return err
+				}
+			case astits.TeletextEventKindDataUnit:
+				u := ev.DataUnit
+				out := teletextOutput{
+					Kind:          "data_unit",
+					PID:           u.PID,
+					ProgramNumber: u.ProgramNumber,
+					Language:      string(u.Language),
+					DataUnitID:    u.DataUnitID,
+					Magazine:      u.Magazine,
+					Row:           u.Row,
+					Page:          u.Page,
+					PTSPresent:    u.PTSPresent,
+					Corrected:     u.Corrected,
+					DataHex:       hex.EncodeToString(u.Data),
+				}
+				if u.PTSPresent && u.PTS != nil {
+					out.PTS = u.PTS.Base
+				}
+				if err := enc.Encode(out); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+
+	for {
+		d, err := dmx.NextData()
+		if errors.Is(err, astits.ErrNoMorePackets) {
+			// Flush events detected on trailing packets
+			return emit(ext.DrainPending())
+		}
+		if err != nil {
+			return err
+		}
+		if err = emit(ext.HandleData(d)); err != nil {
+			return err
+		}
+	}
 }

@@ -158,6 +158,23 @@ This library provides 2 CLIs that will automatically get installed in `GOPATH/bi
 
     $ astits-probe data -i <path to your file> -d <data type: eit|nit|... (repeatable argument | if empty, all data types are shown)>
 
+### Extract DVB teletext data units
+
+The `teletext` command picks a teletext track from the PMT teletext descriptor
+(tag 0x56) and emits the raw EBU teletext data units of the matching
+language/page as JSON lines, each tagged with the PTS of its PES packet.
+Missing descriptors, bad data unit lengths, missing PTS, continuity breaks and
+program changes are reported as `{"kind":"error",...}` lines instead of being
+silently dropped.
+
+    $ astits-probe teletext -i <path to your file> \
+        [-teletext-language <ISO 639-2/B code, e.g. eng>] \
+        [-teletext-magazine <1-8>] [-teletext-page <0-99>] \
+        [-teletext-program <program number>]
+
+The same extraction is available in code through `NewTeletextExtractor`,
+`FindTeletextTracks` and the `TeletextSelector`/`TeletextEvent` types.
+
 ## astits-es-split
 
 ### Split streams into separate .ts files
@@ -182,6 +199,7 @@ This library provides 2 CLIs that will automatically get installed in `GOPATH/bi
 - [ ] Mux SDT packets
 - [x] Demux TOT packets
 - [ ] Mux TOT packets
+- [x] Demux DVB teletext data units (EN 300 472 / EN 300 706)
 - [ ] Demux BAT packets
 - [ ] Mux BAT packets
 - [ ] Demux DIT packets
