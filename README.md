@@ -83,6 +83,52 @@ for {
 }
 ```
 
+## Teletext
+
+DVB teletext subtitles are carried in private_stream_1 PES packets. Feed the
+PES data emitted by the demuxer to a `TeletextDecoder` to accumulate pages and
+receive one update per changed line:
+
+```go
+// Optionally cap the number of cached pages (default: 64, FIFO eviction)
+ttx := astits.NewTeletextDecoder(astits.TeletextDecoderOptMaxPages(32))
+
+for {
+    d, err := dmx.NextData()
+    if err != nil {
+        // End of stream: report any data unit still waiting for completion
+        if err := ttx.Flush(); err != nil {
+            fmt.Println(err)
+        }
+        break
+    }
+    if d.PES == nil {
+        continue
+    }
+
+    // Updates contain the page id and the new/changed row. Data units may span
+    // several PES packets; incomplete ones are buffered automatically.
+    updates, err := ttx.FeedPES(d.PES)
+    if err != nil {
+        // Hamming, truncation, invalid page and cache-eviction errors are
+        // non-fatal: decoding continues and the full history is in ttx.Errors()
+        fmt.Println(err)
+    }
+    for _, u := range updates {
+        fmt.Printf("page %s row %d: %q\n", u.PageID, u.Line.Row, u.Line.Text)
+    }
+}
+
+// Export a whole page as text, rows in ascending order
+if page, ok := ttx.Page(astits.TeletextPageID{Magazine: 1, Page: 0}); ok {
+    fmt.Println(page.Text())
+}
+```
+
+Each line keeps its original 40 bytes in `Line.Raw`, so characters outside the
+default G0 set (rendered as the unicode replacement character) can be reviewed
+against the raw stream.
+
 ## Mux
 
 ```go
