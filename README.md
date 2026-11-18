@@ -170,6 +170,7 @@ This library provides 2 CLIs that will automatically get installed in `GOPATH/bi
 - [x] Add muxer
 - [x] Demux PES packets
 - [x] Mux PES packets
+- [x] Extract AC3 frames from PES packets
 - [x] Demux PAT packets
 - [x] Mux PAT packets
 - [x] Demux PMT packets
